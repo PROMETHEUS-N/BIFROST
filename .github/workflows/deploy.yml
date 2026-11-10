@@ -157,14 +157,14 @@ jobs:
           } catch { $reason=$_.Exception.Message; Write-Error $reason -ErrorAction Continue }
           $row = [pscustomobject]@{ ResourceType='Resource Group'; ResourceName=$env:RESOURCE_NAME; ResourceGroup=''; Status=$status; Reason=$reason; DeploymentStage='deploy-resource-groups'; TimestampUtc=(Get-Date).ToUniversalTime().ToString('o') }
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          $row | ConvertTo-Json -Depth 20 | Set-Content artifacts/result.json
+          $row | ConvertTo-Json -Depth 20 | Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if ($status -eq 'FAILED') { exit 1 }
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -222,14 +222,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           } catch {$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          [pscustomobject]@{ResourceType='Network Security Group';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-nsgs';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')} | ConvertTo-Json -Depth 20 | Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Network Security Group';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-nsgs';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')} | ConvertTo-Json -Depth 20 | Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -268,6 +268,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -281,14 +282,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Route Table';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-route-tables';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Route Table';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-route-tables';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -327,6 +328,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -340,14 +342,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Virtual Network';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Virtual Network';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -386,6 +388,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -402,14 +405,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Subnet';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-subnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Subnet';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-subnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -448,6 +451,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -462,14 +466,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Key Vault';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-key-vaults';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Key Vault';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-key-vaults';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -507,6 +511,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -520,14 +525,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Storage Account';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-storage-accounts';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Storage Account';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-storage-accounts';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -565,6 +570,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
           SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
@@ -579,14 +585,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='SQL Database';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-sql-databases';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='SQL Database';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-sql-databases';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -624,6 +630,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
           try {
@@ -637,14 +644,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Azure OpenAI';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-openai-services';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Azure OpenAI';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-openai-services';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
@@ -683,6 +690,7 @@ jobs:
         env:
           RESOURCE_JSON: ${{ matrix.item }}
           RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
           VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
@@ -699,14 +707,14 @@ jobs:
             $status='DEPLOYED';$reason='What-If and deployment succeeded.'
           }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
           New-Item -ItemType Directory -Force artifacts|Out-Null
-          [pscustomobject]@{ResourceType='Virtual Machine';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vms';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          [pscustomobject]@{ResourceType='Virtual Machine';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vms';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content "artifacts/$env:ARTIFACT_KEY.json"
           if($status -eq 'FAILED'){exit 1}
       - name: Upload resource result
         if: ${{ always() && !matrix.skip }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-result-${{ matrix.artifact }}
-          path: artifacts/result.json
+          path: artifacts/*.json
           if-no-files-found: error
       - name: Skip empty matrix placeholder
         if: ${{ matrix.skip }}
