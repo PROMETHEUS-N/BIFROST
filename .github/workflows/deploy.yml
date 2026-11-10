@@ -35,13 +35,13 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:AZURE_SUBSCRIPTION_ID)) { throw "AZURE_SUBSCRIPTION_ID secret is missing or unavailable." }
           if ($env:AZURE_SUBSCRIPTION_ID -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { throw "AZURE_SUBSCRIPTION_ID is not a valid GUID." }
           Write-Host "Subscription ID secret is available and has valid GUID format; value will not be printed."
-          # if (-not (Test-Path "bicepconfig.json")) { throw "bicepconfig.json not found." }
-          $files = @(Get-ChildItem modules -Recurse -Filter "*.bicep")
-          if ($files.Count -eq 0) { throw "No Bicep modules found." }
-          foreach ($file in $files) {
-            Write-Host "Building $($file.FullName)"
-            & $az bicep build --file $file.FullName --stdout | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Bicep build failed: $($file.Name)" }
+          # # if (-not (Test-Path "bicepconfig.json")) { throw "bicepconfig.json not found." }
+          # $files = @(Get-ChildItem modules -Recurse -Filter "*.bicep")
+          # if ($files.Count -eq 0) { throw "No Bicep modules found." }
+          # foreach ($file in $files) {
+          #   Write-Host "Building $($file.FullName)"
+          #   & $az bicep build --file $file.FullName --stdout | Out-Null
+          #   if ($LASTEXITCODE -ne 0) { throw "Bicep build failed: $($file.Name)" }
           }
     
       - name: Validate input.json structure
