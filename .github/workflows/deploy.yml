@@ -125,10 +125,10 @@ jobs:
             )
             $rows = @()
             foreach ($definition in $definitions) {
-              foreach ($item in @($cfg.landingZones.($definition.Key))) {
+              foreach ($item in @($cfg.landingZones.$($definition.Key))) {
                 $rows += [pscustomobject]@{
                   ResourceType=$definition.Type
-                  ResourceName=[string]$item.($definition.Name)
+                  ResourceName=[string]$item.$($definition.Name)
                   ResourceGroup=[string]$item.resourceGroupName
                   Status='SKIPPED'
                   Reason='Deployment script did not produce a report. Inspect the deployment step logs.'
