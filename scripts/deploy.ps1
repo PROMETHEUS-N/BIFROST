@@ -1,0 +1,370 @@
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+
+$repoRoot = $env:GITHUB_WORKSPACE
+$reportDirectory = Join-Path $repoRoot 'artifacts'
+New-Item -ItemType Directory -Force -Path $reportDirectory | Out-Null
+
+$script:Report = [System.Collections.Generic.List[object]]::new()
+$script:AzPath = (Get-Command az -ErrorAction SilentlyContinue).Source
+$script:RunStamp = Get-Date -Format 'yyyyMMddHHmmss'
+$script:TempCounter = 0
+
+function Add-ReportRow {
+    param(
+        [string]$ResourceType,
+        [string]$ResourceName,
+        [string]$ResourceGroup,
+        [string]$Status,
+        [string]$Reason,
+        [string]$DeploymentStage
+    )
+
+    $script:Report.Add([pscustomobject]@{
+        ResourceType    = $ResourceType
+        ResourceName    = $ResourceName
+        ResourceGroup   = $ResourceGroup
+        Status          = $Status
+        Reason          = $Reason
+        DeploymentStage = $DeploymentStage
+        TimestampUtc    = (Get-Date).ToUniversalTime().ToString('o')
+    })
+}
+
+function Invoke-AzChecked {
+    param([string[]]$Arguments, [string]$Operation)
+
+    $output = & $script:AzPath @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    $details = ($output | Out-String).Trim()
+    if ($exitCode -ne 0) {
+        if ([string]::IsNullOrWhiteSpace($details)) { $details = 'Azure CLI returned no error details.' }
+        throw "$Operation failed (exit code $exitCode): $details"
+    }
+    return $details
+}
+
+function Test-ResourceGroup {
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $output = & $script:AzPath group exists --name $Name 2>$null
+    return ($LASTEXITCODE -eq 0 -and "$output".Trim() -eq 'true')
+}
+
+function Test-AzureResource {
+    param([string[]]$Arguments)
+
+    $null = & $script:AzPath @Arguments 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Invoke-ResourceDeployment {
+    param(
+        [string]$ResourceType,
+        [string]$ResourceName,
+        [string]$ResourceGroup,
+        [string]$Template,
+        [string]$Scope,
+        [string]$Location,
+        [hashtable]$Parameters,
+        [string]$Stage,
+        [scriptblock]$PrerequisiteCheck
+    )
+
+    if ($PrerequisiteCheck) {
+        $skipReason = & $PrerequisiteCheck
+        if (-not [string]::IsNullOrWhiteSpace([string]$skipReason)) {
+            Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'SKIPPED' ([string]$skipReason) $Stage
+            Write-Warning "$ResourceType '$ResourceName' skipped: $skipReason"
+            return
+        }
+    }
+
+    $parameterFile = $null
+    try {
+        if ([string]::IsNullOrWhiteSpace($script:AzPath)) {
+            throw 'Azure CLI (az) was not found on the runner.'
+        }
+        if (-not (Test-Path -LiteralPath $Template)) {
+            throw "Bicep template not found: $Template"
+        }
+
+        $script:TempCounter++
+        $parameterFile = Join-Path $env:RUNNER_TEMP "bifrost-$($script:TempCounter)-$([guid]::NewGuid().ToString('N')).json"
+        $parameterDocument = @{
+            '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+            contentVersion = '1.0.0.0'
+            parameters = @{}
+        }
+        foreach ($key in $Parameters.Keys) {
+            $parameterDocument.parameters[$key] = @{ value = $Parameters[$key] }
+        }
+        $parameterDocument | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $parameterFile -Encoding utf8
+
+        $deploymentName = "bifrost-$($Stage.ToLowerInvariant())-$($script:RunStamp)-$($script:TempCounter)"
+        if ($Scope -eq 'subscription') {
+            $whatIfArgs = @('deployment','sub','what-if','--name',$deploymentName,'--location',$Location,'--template-file',$Template,'--parameters',"@$parameterFile")
+            $createArgs = @('deployment','sub','create','--name',$deploymentName,'--location',$Location,'--template-file',$Template,'--parameters',"@$parameterFile",'--output','none')
+        }
+        else {
+            $whatIfArgs = @('deployment','group','what-if','--name',$deploymentName,'--resource-group',$ResourceGroup,'--template-file',$Template,'--parameters',"@$parameterFile")
+            $createArgs = @('deployment','group','create','--name',$deploymentName,'--resource-group',$ResourceGroup,'--template-file',$Template,'--parameters',"@$parameterFile",'--output','none')
+        }
+
+        $null = Invoke-AzChecked $whatIfArgs "$ResourceType '$ResourceName' What-If"
+        $null = Invoke-AzChecked $createArgs "$ResourceType '$ResourceName' deployment"
+        Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'DEPLOYED' 'What-If completed and Azure deployment succeeded.' $Stage
+        Write-Host "DEPLOYED: $ResourceType '$ResourceName'"
+    }
+    catch {
+        $reason = $_.Exception.Message
+        Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'FAILED' $reason $Stage
+        Write-Error "FAILED: $ResourceType '$ResourceName' - $reason" -ErrorAction Continue
+    }
+    finally {
+        if ($parameterFile -and (Test-Path -LiteralPath $parameterFile)) {
+            Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-ResourceGroupSkipReason {
+    param($Item)
+    $rg = [string]$Item.resourceGroupName
+    if ([string]::IsNullOrWhiteSpace($rg)) { return 'resourceGroupName is missing from this input.json object.' }
+    if (-not (Test-ResourceGroup $rg)) { return "Required resource group '$rg' does not exist; its deployment may have failed or it is unavailable." }
+    return $null
+}
+
+function Get-InputItems {
+    param($Configuration, [string]$Property)
+    if ($null -eq $Configuration.landingZones) { return @() }
+    $value = $Configuration.landingZones.$Property
+    if ($null -eq $value) { return @() }
+    return @($value)
+}
+
+function Get-ResourceName {
+    param($Item, [string[]]$Properties)
+    foreach ($property in $Properties) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$Item.$property)) { return [string]$Item.$property }
+    }
+    return '(name missing)'
+}
+
+$configuration = $null
+try {
+    $inputPath = Join-Path $repoRoot 'input.json'
+    if (-not (Test-Path -LiteralPath $inputPath)) { throw 'input.json was not found in the repository root.' }
+    $configuration = Get-Content -LiteralPath $inputPath -Raw | ConvertFrom-Json
+}
+catch {
+    Add-ReportRow 'Configuration' 'input.json' '' 'FAILED' $_.Exception.Message 'prechecks'
+}
+
+if ($configuration) {
+    $resourceDefinitions = @(
+        @{ Type='Resource Group'; Property='resourceGroups'; Name=@('rgName','name'); Stage='deploy-rg' },
+        @{ Type='Network Security Group'; Property='nsgs'; Name=@('name'); Stage='deploy-nsg' },
+        @{ Type='Route Table'; Property='routeTables'; Name=@('name'); Stage='deploy-route-table' },
+        @{ Type='Virtual Network'; Property='vnets'; Name=@('name'); Stage='deploy-vnet' },
+        @{ Type='Subnet'; Property='subnets'; Name=@('name'); Stage='deploy-subnet' },
+        @{ Type='Key Vault'; Property='keyVaults'; Name=@('name'); Stage='deploy-keyvault' },
+        @{ Type='Storage Account'; Property='storageAccounts'; Name=@('name'); Stage='deploy-storage' },
+        @{ Type='SQL Database'; Property='sqlDatabases'; Name=@('databaseName','name'); Stage='deploy-sql' },
+        @{ Type='Azure OpenAI'; Property='openAiServices'; Name=@('name'); Stage='deploy-openai' },
+        @{ Type='Virtual Machine'; Property='vms'; Name=@('name'); Stage='deploy-vm' }
+    )
+
+    $allRequested = @()
+    foreach ($definition in $resourceDefinitions) {
+        foreach ($item in (Get-InputItems $configuration $definition.Property)) {
+            $allRequested += [pscustomobject]@{
+                Definition = $definition
+                Item = $item
+                Name = Get-ResourceName $item $definition.Name
+            }
+        }
+    }
+
+    $gateFailure = $null
+    if ($env:PRECHECK_OUTCOME -ne 'success') {
+        $gateFailure = "Pre-deployment validation did not succeed (outcome: $($env:PRECHECK_OUTCOME))."
+    }
+    elseif ($env:AZURE_LOGIN_OUTCOME -ne 'success') {
+        $gateFailure = "Azure OIDC login did not succeed (outcome: $($env:AZURE_LOGIN_OUTCOME))."
+    }
+
+    if ($gateFailure) {
+        foreach ($entry in $allRequested) {
+            $rg = [string]$entry.Item.resourceGroupName
+            Add-ReportRow $entry.Definition.Type $entry.Name $rg 'SKIPPED' $gateFailure $entry.Definition.Stage
+        }
+    }
+    else {
+        $tenantId = (Invoke-AzChecked @('account','show','--query','tenantId','--output','tsv') 'Read Azure tenant ID').Trim()
+
+        foreach ($x in (Get-InputItems $configuration 'resourceGroups')) {
+            $name = Get-ResourceName $x @('rgName','name')
+            Invoke-ResourceDeployment 'Resource Group' $name '' 'modules/RG/resourcegroup.bicep' 'subscription' ([string]$x.location) @{
+                rgname=$x.rgName; location=$x.location; tags=$x.tags
+            } 'deploy-rg'
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'nsgs')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Network Security Group' $name ([string]$x.resourceGroupName) 'modules/networking/nsg.bicep' 'group' ([string]$x.location) @{
+                location=$x.location; nsgName=$x.name; securityRules=@($x.securityRules); tags=$x.tags
+            } 'deploy-nsg' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'routeTables')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Route Table' $name ([string]$x.resourceGroupName) 'modules/networking/routetable.bicep' 'group' ([string]$x.location) @{
+                routeTableName=$x.name; location=$x.location; disableBgpRoutePropagation=$x.disableBgpRoutePropagation; routes=@($x.routes); tags=$x.tags
+            } 'deploy-route-table' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'vnets')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Virtual Network' $name ([string]$x.resourceGroupName) 'modules/networking/vnet.bicep' 'group' ([string]$x.location) @{
+                location=$x.location; vnetName=$x.name; addressPrefixes=@($x.addressPrefixes); tags=$x.tags; dnsServers=@($x.dnsServers); subnets=@()
+            } 'deploy-vnet' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'subnets')) {
+            $name = Get-ResourceName $x @('name')
+            $prerequisite = {
+                $rgReason = Get-ResourceGroupSkipReason $x
+                if ($rgReason) { return $rgReason }
+                if (-not (Test-AzureResource @('network','vnet','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.vnetName,'--output','none'))) {
+                    return "Required VNet '$($x.vnetName)' is unavailable."
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$x.networkSecurityGroupName) -and -not (Test-AzureResource @('network','nsg','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.networkSecurityGroupName,'--output','none'))) {
+                    return "Required NSG '$($x.networkSecurityGroupName)' is unavailable."
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$x.routeTableName) -and -not (Test-AzureResource @('network','route-table','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.routeTableName,'--output','none'))) {
+                    return "Required route table '$($x.routeTableName)' is unavailable."
+                }
+                return $null
+            }.GetNewClosure()
+            Invoke-ResourceDeployment 'Subnet' $name ([string]$x.resourceGroupName) 'modules/networking/subnet.bicep' 'group' ([string]$x.location) @{
+                vnetName=$x.vnetName; subnetName=$x.name; addressPrefix=$x.addressPrefix; networkSecurityGroupName=$x.networkSecurityGroupName; routeTableName=$x.routeTableName; serviceEndpoints=@($x.serviceEndpoints); privateEndpointNetworkPolicies=$x.privateEndpointNetworkPolicies; privateLinkServiceNetworkPolicies=$x.privateLinkServiceNetworkPolicies
+            } 'deploy-subnet' $prerequisite
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'keyVaults')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Key Vault' $name ([string]$x.resourceGroupName) 'modules/security/keyvault.bicep' 'group' ([string]$x.location) @{
+                keyVaultName=$x.name; location=$x.location; tenantId=$tenantId; skuName=$x.skuName; skuFamily=$x.skuFamily; enableRbacAuthorization=$x.enableRbacAuthorization; enablePurgeProtection=$x.enablePurgeProtection; softDeleteRetentionInDays=$x.softDeleteRetentionInDays; publicNetworkAccess=$x.publicNetworkAccess; tags=$x.tags
+            } 'deploy-keyvault' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'storageAccounts')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Storage Account' $name ([string]$x.resourceGroupName) 'modules/storage/storageAccount.bicep' 'group' ([string]$x.location) @{
+                storageAccountName=$x.name; location=$x.location; tags=$x.tags; skuName=$x.skuName; kind=$x.kind; accessTier=$x.accessTier; minimumTlsVersion=$x.minimumTlsVersion; supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly; allowBlobPublicAccess=$x.allowBlobPublicAccess; allowSharedKeyAccess=$x.allowSharedKeyAccess; publicNetworkAccess=$x.publicNetworkAccess; containerNames=@($x.containerNames); blobServiceName=$x.blobServiceName; containerPublicAccess=$x.containerPublicAccess
+            } 'deploy-storage' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'sqlDatabases')) {
+            $name = Get-ResourceName $x @('databaseName','name')
+            Invoke-ResourceDeployment 'SQL Database' $name ([string]$x.resourceGroupName) 'modules/database/sql.bicep' 'group' ([string]$x.location) @{
+                location=$x.location; serverName=$x.serverName; databaseName=$x.databaseName; administratorLogin=$x.administratorLogin; administratorLoginPassword=$env:SQL_ADMIN_PASSWORD; sqlServerVersion=$x.sqlServerVersion; databaseSkuName=$x.databaseSkuName; databaseSkuTier=$x.databaseSkuTier; databaseCapacity=$x.databaseCapacity; databaseMaxSizeBytes=$x.databaseMaxSizeBytes; publicNetworkAccess=$x.publicNetworkAccess; minimumTlsVersion=$x.minimumTlsVersion; tags=$x.tags
+            } 'deploy-sql' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'openAiServices')) {
+            $name = Get-ResourceName $x @('name')
+            Invoke-ResourceDeployment 'Azure OpenAI' $name ([string]$x.resourceGroupName) 'modules/ai/openai.bicep' 'group' ([string]$x.location) @{
+                accountName=$x.name; location=$x.location; skuName=$x.skuName; customSubDomainName=$x.customSubDomainName; publicNetworkAccess=$x.publicNetworkAccess; tags=$x.tags
+            } 'deploy-openai' { Get-ResourceGroupSkipReason $x }
+        }
+
+        foreach ($x in (Get-InputItems $configuration 'vms')) {
+            $name = Get-ResourceName $x @('name')
+            $prerequisite = {
+                $rgReason = Get-ResourceGroupSkipReason $x
+                if ($rgReason) { return $rgReason }
+                if (-not (Test-AzureResource @('network','vnet','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.vnetName,'--output','none'))) {
+                    return "Required VNet '$($x.vnetName)' is unavailable."
+                }
+                if (-not (Test-AzureResource @('network','vnet','subnet','show','--resource-group',[string]$x.resourceGroupName,'--vnet-name',[string]$x.vnetName,'--name',[string]$x.subnetName,'--output','none'))) {
+                    return "Required subnet '$($x.subnetName)' in VNet '$($x.vnetName)' is unavailable."
+                }
+                return $null
+            }.GetNewClosure()
+            Invoke-ResourceDeployment 'Virtual Machine' $name ([string]$x.resourceGroupName) 'modules/compute/vm.bicep' 'group' ([string]$x.location) @{
+                location=$x.location; computerName=$x.computerName; vmName=$x.name; adminUsername=$x.adminUsername; vmAdminPassword=$env:VM_ADMIN_PASSWORD; vmSize=$x.vmSize; tags=$x.tags; vnetName=$x.vnetName; subnetName=$x.subnetName; nicName=$x.nicName; privateIpAllocationMethod=$x.privateIpAllocationMethod; imagePublisher=$x.imagePublisher; imageOffer=$x.imageOffer; imageSku=$x.imageSku; imageVersion=$x.imageVersion; osDiskStorageAccountType=$x.osDiskStorageAccountType; osDiskCreateOption=$x.osDiskCreateOption; osDiskSizeGB=$x.osDiskSizeGB; enableBootDiagnostics=$x.enableBootDiagnostics
+            } 'deploy-vm' $prerequisite
+        }
+    }
+}
+
+# Ensure every configured object has exactly one report row, including objects
+# not reached because a global precondition or an unexpected orchestration error occurred.
+if ($configuration) {
+    foreach ($definition in $resourceDefinitions) {
+        foreach ($item in (Get-InputItems $configuration $definition.Property)) {
+            $resourceName = Get-ResourceName $item $definition.Name
+            $alreadyReported = @($script:Report | Where-Object {
+                $_.ResourceType -eq $definition.Type -and
+                $_.ResourceName -eq $resourceName -and
+                $_.ResourceGroup -eq [string]$item.resourceGroupName
+            }).Count -gt 0
+            if (-not $alreadyReported) {
+                Add-ReportRow $definition.Type $resourceName ([string]$item.resourceGroupName) 'SKIPPED' 'No deployment attempt was recorded; check precheck, authentication, or orchestration errors in the workflow log.' $definition.Stage
+            }
+        }
+    }
+}
+
+$csvPath = Join-Path $reportDirectory 'deployment-report.csv'
+$jsonPath = Join-Path $reportDirectory 'deployment-report.json'
+$markdownPath = Join-Path $reportDirectory 'deployment-report.md'
+
+$script:Report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding utf8
+$script:Report | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $jsonPath -Encoding utf8
+
+$deployed = @($script:Report | Where-Object Status -eq 'DEPLOYED').Count
+$failed = @($script:Report | Where-Object Status -eq 'FAILED').Count
+$skipped = @($script:Report | Where-Object Status -eq 'SKIPPED').Count
+
+$markdown = @(
+    '# ❄️ BIFROST Deployment Report'
+    ''
+    "- **Workflow run:** $env:GITHUB_RUN_ID"
+    "- **Commit:** $env:GITHUB_SHA"
+    "- **Generated (UTC):** $((Get-Date).ToUniversalTime().ToString('o'))"
+    ''
+    '## Summary'
+    ''
+    "| Total | Deployed | Failed | Skipped |"
+    '|---:|---:|---:|---:|'
+    "| $($script:Report.Count) | $deployed | $failed | $skipped |"
+    ''
+    '## Resource details'
+    ''
+    '| Type | Resource | Resource group | Status | Reason |'
+    '|---|---|---|---|---|'
+)
+foreach ($row in $script:Report) {
+    $safeReason = ([string]$row.Reason -replace '\|','\|' -replace '\r?\n',' ')
+    $markdown += "| $($row.ResourceType) | $($row.ResourceName) | $($row.ResourceGroup) | **$($row.Status)** | $safeReason |"
+}
+$markdown | Set-Content -LiteralPath $markdownPath -Encoding utf8
+
+if ($env:GITHUB_STEP_SUMMARY) {
+    @(
+        '## ❄️ BIFROST deployment summary'
+        ''
+        "| Total | Deployed | Failed | Skipped |"
+        '|---:|---:|---:|---:|'
+        "| $($script:Report.Count) | $deployed | $failed | $skipped |"
+        ''
+        'Full CSV, JSON and Markdown reports are available in the **bifrost-deployment-report** workflow artifact.'
+    ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+}
+
+Write-Host "Deployment report generated. Total=$($script:Report.Count), Deployed=$deployed, Failed=$failed, Skipped=$skipped."
