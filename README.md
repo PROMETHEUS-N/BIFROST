@@ -65,11 +65,16 @@ flowchart TD
         DB --> SQL
     end
 
+    SCRIPTS["scripts/"]
+    REPORTSCRIPT["deploy.ps1"]
+    SCRIPTS --> REPORTSCRIPT
+
     README["📖 README.md"]
 
     ROOT --> GITHUB
     ROOT --> CONFIG
     ROOT --> MODULES
+    ROOT --> SCRIPTS
     ROOT --> README
 
     classDef root fill:#172554,color:#fff,stroke:#60a5fa
@@ -99,7 +104,7 @@ flowchart TD
 
 ## 🔄 CI/CD workflow
 
-The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It reads `input.json`, validates the requested dev configuration, authenticates to Azure with OIDC, and deploys resources in dependency order.
+The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It reads `input.json`, validates the requested dev configuration, authenticates to Azure with OIDC, and invokes `scripts/deploy.ps1` to process every requested resource in dependency order. A failure for one resource is recorded and does not stop attempts for unrelated resources.
 
 ```mermaid
 flowchart TD
@@ -211,6 +216,28 @@ The resource deployment jobs generate temporary ARM parameter JSON files from th
 > ⚠️ **Current workflow configuration to review:** the `prechecks` job runs on `ubuntu-latest`, but its PowerShell step checks for Azure CLI at a Windows-specific path (`C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd`). That path is not normally present on an Ubuntu runner. Align the runner and CLI invocation before relying on this precheck.
 
 The final Azure resource verification job is currently commented out in `deploy.yml`; it is not an active workflow job.
+
+## 📊 Fault-tolerant deployment report
+
+The workflow creates a `bifrost-deployment-report` artifact after each run. It contains:
+
+- `deployment-report.csv` — filterable resource-by-resource status report.
+- `deployment-report.json` — structured report for automation and downstream processing.
+- `deployment-report.md` — readable summary and detailed resource table.
+
+Each requested resource is recorded as one of:
+
+| Status | Meaning |
+|---|---|
+| `DEPLOYED` | What-If and deployment completed successfully. |
+| `FAILED` | The deployment was attempted but Azure/Bicep returned an error. |
+| `SKIPPED` | A prerequisite, validation, authentication, or other condition prevented the attempt. The report includes the reason. |
+
+The workflow attempts independent resources even when another resource fails. Subnets require their VNet and any configured NSG/route table; VMs require their resource group, VNet and subnet. Dependent resources are marked `SKIPPED` when prerequisites are unavailable. Resource groups are deployed first; networking and service resources are then attempted in dependency-aware order.
+
+The report is uploaded even when deployment fails. The workflow is marked failed at the end if any resource failed or was skipped, so the run remains visibly unsuccessful without aborting the remaining resource attempts. The artifact is retained for 90 days.
+
+To download it, open the completed GitHub Actions run and download the `bifrost-deployment-report` artifact.
 
 ## 📝 Configuration — `input.json`
 
