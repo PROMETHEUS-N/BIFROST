@@ -44,7 +44,7 @@ jobs:
 
   azure-login-check:
     name: 🔐 Azure OIDC authentication
-    runs-on: [self-hosted, X64, Windows]
+    runs-on: ubuntu-latest
     needs: prechecks
     if: ${{ needs.prechecks.result == 'success' }}
     environment: dev
@@ -70,7 +70,7 @@ jobs:
 
   deploy-and-report:
     name: 🚀 Deploy resources and publish report
-    runs-on: [self-hosted, X64, Windows]
+    runs-on: ubuntu-latest
     needs: [prechecks, azure-login-check]
     if: ${{ always() }}
     environment: dev
