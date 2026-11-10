@@ -65,16 +65,11 @@ flowchart TD
         DB --> SQL
     end
 
-    SCRIPTS["scripts/"]
-    REPORTSCRIPT["deploy.ps1"]
-    SCRIPTS --> REPORTSCRIPT
-
     README["📖 README.md"]
 
     ROOT --> GITHUB
     ROOT --> CONFIG
     ROOT --> MODULES
-    ROOT --> SCRIPTS
     ROOT --> README
 
     classDef root fill:#172554,color:#fff,stroke:#60a5fa
@@ -104,7 +99,7 @@ flowchart TD
 
 ## 🔄 CI/CD workflow
 
-The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It validates `input.json`, authenticates to Azure with OIDC, and invokes `scripts/deploy.ps1` to process requested resources in dependency-aware order.
+The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It validates `input.json`, authenticates to Azure with OIDC, and runs the per-resource deployment and reporting logic directly inside the workflow steps.
 
 ```mermaid
 flowchart TD
@@ -165,7 +160,7 @@ flowchart TD
 
 ### 🧭 Deployment dependency and continuation model
 
-Each requested resource is attempted independently when its prerequisites are available. A failure is captured as a resource result and does not terminate the orchestration loop.
+Each requested resource is attempted independently when its prerequisites are available. A failure is captured as a resource result and does not terminate the orchestration loop. All deployment and reporting logic is maintained directly in `.github/workflows/deploy.yml`; no separate deployment script is required.
 
 ```mermaid
 flowchart TD
