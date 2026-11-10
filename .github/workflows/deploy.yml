@@ -9,7 +9,7 @@ permissions:
 jobs:
   prechecks:
     name: Bicep lint and input validation
-    runs-on: [self-hosted, X64, Windows]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check Azure CLI, Bicep and required secrets
