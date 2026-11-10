@@ -144,6 +144,24 @@ jobs:
               Set-Content 'artifacts/deployment-report.md' -Encoding utf8
           }
 
+          if (-not (Test-Path 'artifacts/deployment-report.json')) {
+            Import-Csv 'artifacts/deployment-report.csv' | ConvertTo-Json -Depth 10 |
+              Set-Content 'artifacts/deployment-report.json' -Encoding utf8
+          }
+          if (-not (Test-Path 'artifacts/deployment-report.md')) {
+            $report = Import-Csv 'artifacts/deployment-report.csv'
+            $lines = @(
+              '# ❄️ BIFROST Deployment Report'
+              ''
+              '| Type | Resource | Resource group | Status | Reason |'
+              '|---|---|---|---|---|'
+            )
+            $lines += @($report | ForEach-Object {
+              "| $($_.ResourceType) | $($_.ResourceName) | $($_.ResourceGroup) | $($_.Status) | $($_.Reason) |"
+            })
+            $lines | Set-Content 'artifacts/deployment-report.md' -Encoding utf8
+          }
+
       - name: Upload complete deployment report
         id: upload-report
         if: ${{ always() }}
