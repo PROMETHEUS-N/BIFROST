@@ -9,13 +9,11 @@
     "project": "PIKE-IAC"
   },
   "subscription": {
-    "name": "PIKE-SUBSCRIPTION",
     "subscriptionId": "${AZURE_SUBSCRIPTION_ID}"
   },
   "deployment": {
     "location": "EastUS"
   },
-  
   "landingZones": {
     "resourceGroups": [
       {
