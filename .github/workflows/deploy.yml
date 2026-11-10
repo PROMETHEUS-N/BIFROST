@@ -119,6 +119,8 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # 🏗️ Process each resource from input.json. A resource-level failure is recorded and does not stop later independent deployments.
+      # 🛟 continue-on-error is an extra safeguard: the PowerShell deployment logic catches expected per-resource errors itself.
+      # It allows later steps (especially fallback report generation and artifact upload) to run if the entire PowerShell step hits an unexpected error.
       - name: Run fault-tolerant resource deployment
         id: deployment
         shell: pwsh
