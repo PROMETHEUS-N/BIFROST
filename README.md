@@ -104,118 +104,124 @@ flowchart TD
 
 ## 🔄 CI/CD workflow
 
-The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It reads `input.json`, validates the requested dev configuration, authenticates to Azure with OIDC, and invokes `scripts/deploy.ps1` to process every requested resource in dependency order. A failure for one resource is recorded and does not stop attempts for unrelated resources.
+The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It validates `input.json`, authenticates to Azure with OIDC, and invokes `scripts/deploy.ps1` to process requested resources in dependency-aware order.
 
 ```mermaid
 flowchart TD
     START(["👤 Manual trigger<br/>workflow_dispatch"])
 
-    subgraph PRECHECK["🧪 Pre-deployment checks"]
-        CHECKOUT1["Checkout repository"]
-        TOOLS["Check Azure CLI and Bicep<br/>Validate required secrets"]
-        JSON["Validate input.json<br/>Environment = dev<br/>Required landingZones arrays"]
-        CHECKOUT1 --> TOOLS --> JSON
+    subgraph CHECKS["🧪 Input validation"]
+        CO["Checkout repository"]
+        VALIDATE["Validate input.json<br/>Required arrays and secrets"]
+        CO --> VALIDATE
     end
 
-    subgraph AUTH["🔑 Azure authentication"]
-        LOGIN["Azure login via OIDC"]
-        SUB["Select and verify subscription"]
-        LOGIN --> SUB
+    subgraph IDENTITY["🔐 Azure identity"]
+        LOGIN["Azure OIDC login"]
+        VERIFY["Verify subscription"]
+        LOGIN --> VERIFY
     end
 
-    subgraph DEPLOY["🚀 Infrastructure deployment"]
-        RG["🏗️ Resource Groups"]
-        NSG["🛡️ Network Security Groups"]
-        RT["🧭 Route Tables"]
-        VNET["🌐 Virtual Networks"]
-        SUBNET["🔗 Subnets"]
-        KV["🔐 Key Vaults"]
-        SA["💾 Storage Accounts"]
-        SQL["🗄️ SQL Databases"]
-        OAI["🤖 Azure OpenAI"]
-        VM["🖥️ Virtual Machines"]
-
-        RG --> NSG --> RT --> VNET --> SUBNET --> KV --> SA --> SQL --> OAI --> VM
+    subgraph ORCHESTRATION["🚀 Resilient deployment orchestration"]
+        RUN["scripts/deploy.ps1"]
+        RG["Resource Groups"]
+        NET["Networking resources"]
+        SERVICES["Key Vault, Storage, SQL, OpenAI"]
+        VM["Virtual Machines"]
+        RUN --> RG --> NET
+        RG --> SERVICES
+        NET --> VM
     end
 
-    DONE(["✅ Workflow completed"])
+    subgraph REPORTING["📊 Final reporting"]
+        CSV["deployment-report.csv"]
+        JSON["deployment-report.json"]
+        MD["deployment-report.md"]
+        ARTIFACT["Upload bifrost-deployment-report"]
+        CSV --> ARTIFACT
+        JSON --> ARTIFACT
+        MD --> ARTIFACT
+    end
 
-    START --> CHECKOUT1
-    JSON --> LOGIN
-    SUB --> RG
-    VM --> DONE
+    DONE(["🏁 Run summary"])
 
-    classDef trigger fill:#1e3a8a,color:#fff,stroke:#60a5fa
-    classDef checks fill:#164e63,color:#fff,stroke:#22d3ee
+    START --> CO
+    VALIDATE --> LOGIN
+    VERIFY --> RUN
+    RG --> CSV
+    NET --> JSON
+    SERVICES --> MD
+    VM --> MD
+    ARTIFACT --> DONE
+
+    classDef gate fill:#164e63,color:#fff,stroke:#22d3ee
     classDef deploy fill:#14532d,color:#fff,stroke:#4ade80
-    classDef success fill:#166534,color:#fff,stroke:#86efac
-    class START trigger
-    class CHECKOUT1,TOOLS,JSON,LOGIN,SUB checks
-    class RG,NSG,RT,VNET,SUBNET,KV,SA,SQL,OAI,VM deploy
-    class DONE success
+    classDef report fill:#581c87,color:#fff,stroke:#c084fc
+    class START,DONE gate
+    class CO,VALIDATE,LOGIN,VERIFY gate
+    class RUN,RG,NET,SERVICES,VM deploy
+    class CSV,JSON,MD,ARTIFACT report
 ```
 
-### 🧭 Job dependency map
+### 🧭 Deployment dependency and continuation model
 
-Each deployment job waits for its prerequisite job. A failure in a required job prevents dependent jobs from proceeding.
+Each requested resource is attempted independently when its prerequisites are available. A failure is captured as a resource result and does not terminate the orchestration loop.
 
 ```mermaid
 flowchart TD
-    subgraph VALIDATION["🧪 Validation gate"]
-        P["prechecks"]
+    subgraph BASE["🏗️ Resource group foundation"]
+        RG["Resource Groups"]
     end
 
-    subgraph IDENTITY["🔐 Identity gate"]
-        A["azure-login-check"]
+    subgraph NETWORK["🌐 Network resources"]
+        NSG["NSGs"]
+        RT["Route Tables"]
+        VNET["VNets"]
+        SUBNET["Subnets"]
+        NSG --> SUBNET
+        RT --> SUBNET
+        VNET --> SUBNET
     end
 
-    subgraph ORDERED_DEPLOYMENT["🚀 Sequential deployment jobs"]
-        RG["deploy-rg"]
-        NSG["deploy-nsg"]
-        RT["deploy-route-table"]
-        VN["deploy-vnet"]
-        SN["deploy-subnet"]
-        KV["deploy-keyvault"]
-        ST["deploy-storage"]
-        SQL["deploy-sql"]
-        OAI["deploy-openai"]
-        VM["deploy-vm"]
-
-        RG --> NSG --> RT --> VN --> SN --> KV --> ST --> SQL --> OAI --> VM
+    subgraph INDEPENDENT["☁️ Other resource types"]
+        KV["Key Vault"]
+        STORAGE["Storage Accounts"]
+        SQL["SQL Databases"]
+        OAI["Azure OpenAI"]
     end
 
-    P --> A
-    P --> RG
-    A --> RG
+    subgraph COMPUTE["🖥️ Compute"]
+        VM["Virtual Machines"]
+    end
 
-    classDef gate fill:#164e63,color:#fff,stroke:#22d3ee
-    classDef job fill:#14532d,color:#fff,stroke:#4ade80
-    class P,A gate
-    class RG,NSG,RT,VN,SN,KV,ST,SQL,OAI,VM job
+    RG --> NSG
+    RG --> RT
+    RG --> VNET
+    RG --> KV
+    RG --> STORAGE
+    RG --> SQL
+    RG --> OAI
+    RG --> VM
+    SUBNET --> VM
+
+    classDef foundation fill:#164e63,color:#fff,stroke:#22d3ee
+    classDef resource fill:#14532d,color:#fff,stroke:#4ade80
+    class RG foundation
+    class NSG,RT,VNET,SUBNET,KV,STORAGE,SQL,OAI,VM resource
 ```
 
-### ⚙️ Workflow execution details
+### ⚙️ Workflow execution stages
 
-| Stage | Job | Runner | Main activity |
+| Stage | Job / script | Runner | Main activity |
 |---|---|---|---|
-| 1 | `prechecks` | `ubuntu-latest` | Checks CLI/Bicep and required secrets; validates `input.json` |
+| 1 | `prechecks` | Ubuntu hosted | Validates JSON structure, required arrays, secrets and subscription GUID |
 | 2 | `azure-login-check` | Windows self-hosted | Azure OIDC login and subscription verification |
-| 3 | `deploy-rg` | Windows self-hosted | Subscription-scope resource-group What-If and deployment |
-| 4 | `deploy-nsg` | Windows self-hosted | NSG What-If and deployment |
-| 5 | `deploy-route-table` | Windows self-hosted | Route-table What-If and deployment |
-| 6 | `deploy-vnet` | Windows self-hosted | VNet What-If and deployment; skips an existing VNet |
-| 7 | `deploy-subnet` | Windows self-hosted | Subnet What-If and deployment |
-| 8 | `deploy-keyvault` | Windows self-hosted | Key Vault What-If and deployment |
-| 9 | `deploy-storage` | Windows self-hosted | Storage account and container deployment |
-| 10 | `deploy-sql` | Windows self-hosted | SQL server and database deployment |
-| 11 | `deploy-openai` | Windows self-hosted | Azure OpenAI What-If and deployment |
-| 12 | `deploy-vm` | Windows self-hosted | Windows VM and NIC What-If and deployment |
+| 3 | `deploy-and-report` | Windows self-hosted | Re-authenticates, invokes the deployment orchestrator, and continues through individual resource failures |
+| 4 | Report upload | Same Windows runner | Publishes CSV, JSON and Markdown reports as a workflow artifact |
 
-The resource deployment jobs generate temporary ARM parameter JSON files from the corresponding objects in `input.json`. They run an Azure deployment `what-if` before the deployment command.
+The deployment job uses `if: always()` so the report stage can run after failed prechecks or Azure authentication. When a global prerequisite fails, every requested resource is recorded as `SKIPPED` with the relevant reason. The deployment runner re-authenticates because Azure login state is not guaranteed to persist between GitHub Actions jobs.
 
-> ⚠️ **Current workflow configuration to review:** the `prechecks` job runs on `ubuntu-latest`, but its PowerShell step checks for Azure CLI at a Windows-specific path (`C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd`). That path is not normally present on an Ubuntu runner. Align the runner and CLI invocation before relying on this precheck.
-
-The final Azure resource verification job is currently commented out in `deploy.yml`; it is not an active workflow job.
+Each resource deployment runs What-If before create. Errors are caught per resource; resources with unavailable prerequisites are marked `SKIPPED`. The workflow's final status is marked failed if any resource failed or was skipped, but only after the report has been uploaded.
 
 ## 📊 Fault-tolerant deployment report
 
