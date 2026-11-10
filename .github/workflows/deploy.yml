@@ -1,5 +1,4 @@
-name: PIKE Modular Azure Infrastructure Deployment
-
+name: PIKE | Working Module
 on:
   workflow_dispatch:
 
