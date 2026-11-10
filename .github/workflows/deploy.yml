@@ -730,6 +730,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Download matrix result artifacts
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: bifrost-result-*
@@ -739,7 +740,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $cfg=Get-Content input.json -Raw|ConvertFrom-Json
+          $cfg=$null
+          try { $cfg=Get-Content input.json -Raw|ConvertFrom-Json }
+          catch {
+            Write-Warning "input.json could not be parsed: $($_.Exception.Message)"
+          }
           $definitions=@(
             @{Key='resourceGroups';Type='Resource Group';Name='rgName';Stage='deploy-resource-groups'},
             @{Key='nsgs';Type='Network Security Group';Name='name';Stage='deploy-nsgs'},
@@ -758,6 +763,7 @@ jobs:
               try{$rows+=Get-Content $file.FullName -Raw|ConvertFrom-Json}catch{Write-Warning "Could not parse result file $($file.Name): $($_.Exception.Message)"}
             }
           }
+          if($cfg){
           foreach($definition in $definitions){
             foreach($item in @($cfg.landingZones.($definition.Key))){
               $resourceName=[string]$item.($definition.Name)
@@ -766,6 +772,9 @@ jobs:
                 $rows+= [pscustomobject]@{ResourceType=$definition.Type;ResourceName=$resourceName;ResourceGroup=[string]$item.resourceGroupName;Status='SKIPPED';Reason='No matrix result was uploaded. Inspect the corresponding stage, prerequisite, or runner logs.';DeploymentStage=$definition.Stage;TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}
               }
             }
+          }
+          } else {
+            $rows += [pscustomobject]@{ResourceType='Configuration';ResourceName='input.json';ResourceGroup='';Status='FAILED';Reason='input.json could not be parsed. Review the prepare job logs.';DeploymentStage='prepare';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}
           }
           New-Item -ItemType Directory -Force artifacts|Out-Null
           $rows|Export-Csv artifacts/deployment-report.csv -NoTypeInformation -Encoding utf8
