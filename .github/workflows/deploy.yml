@@ -30,10 +30,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
           if ([string]$cfg.environment -ne 'dev') { throw "Expected root environment 'dev'." }
-          $requiredArrays = @('resourceGroups','vnets','subnets','nsgs','routeTables','vms','keyVaults','storageAccounts','sqlDatabases','openAiServices')
-          foreach ($name in $requiredArrays) {
-            if ($null -eq $cfg.landingZones.$name) { throw "landingZones.$name is missing from input.json." }
-          }
+          if ($null -eq $cfg.landingZones) { throw 'landingZones is missing from input.json.' }
+          # Resource arrays are optional. Only resource types present in input.json are processed.
           if (@($cfg.landingZones.resourceGroups).Count -eq 0) { throw 'At least one resource group must be requested.' }
           foreach ($secretName in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($secretName))) {
