@@ -11,6 +11,7 @@ jobs:
   prechecks:
     name: 🧪 Validate deployment input
     runs-on: ubuntu-latest
+    environment: dev
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -82,10 +83,23 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Re-authenticate to Azure on the deployment runner
+        id: azure-login
+        if: ${{ needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Run fault-tolerant resource deployment
         id: deployment
         shell: pwsh
         continue-on-error: true
+        env:
+          PRECHECK_OUTCOME: ${{ needs.prechecks.result }}
+          AZURE_LOGIN_OUTCOME: ${{ steps.azure-login.outcome }}
         run: |
           $ErrorActionPreference = 'Stop'
           ./scripts/deploy.ps1
