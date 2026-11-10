@@ -1,4 +1,4 @@
-name: ❄️ BIFROST | Matrix Infrastructure Deployment
+name: BIFROST | Matrix Infrastructure Deployment
 
 on:
   workflow_dispatch:
@@ -14,16 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     outputs:
-      resource_groups: ${ steps.matrices.outputs.resource_groups }
-      nsgs: ${ steps.matrices.outputs.nsgs }
-      route_tables: ${ steps.matrices.outputs.route_tables }
-      vnets: ${ steps.matrices.outputs.vnets }
-      subnets: ${ steps.matrices.outputs.subnets }
-      key_vaults: ${ steps.matrices.outputs.key_vaults }
-      storage_accounts: ${ steps.matrices.outputs.storage_accounts }
-      sql_databases: ${ steps.matrices.outputs.sql_databases }
-      openai_services: ${ steps.matrices.outputs.openai_services }
-      vms: ${ steps.matrices.outputs.vms }
+      resource_groups: ${{ steps.matrices.outputs.resource_groups }}
+      nsgs: ${{ steps.matrices.outputs.nsgs }}
+      route_tables: ${{ steps.matrices.outputs.route_tables }}
+      vnets: ${{ steps.matrices.outputs.vnets }}
+      subnets: ${{ steps.matrices.outputs.subnets }}
+      key_vaults: ${{ steps.matrices.outputs.key_vaults }}
+      storage_accounts: ${{ steps.matrices.outputs.storage_accounts }}
+      sql_databases: ${{ steps.matrices.outputs.sql_databases }}
+      openai_services: ${{ steps.matrices.outputs.openai_services }}
+      vms: ${{ steps.matrices.outputs.vms }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
