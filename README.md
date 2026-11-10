@@ -118,7 +118,7 @@ flowchart TD
     end
 
     subgraph ORCHESTRATION["🚀 Resilient deployment orchestration"]
-        RUN["scripts/deploy.ps1"]
+        RUN["Inline PowerShell deployment steps<br/>deploy.yml"]
         RG["Resource Groups"]
         NET["Networking resources"]
         SERVICES["Key Vault, Storage, SQL, OpenAI"]
