@@ -188,6 +188,7 @@ if ($configuration) {
         }
     }
 
+    try {
     $gateFailure = $null
     if ($env:PRECHECK_OUTCOME -ne 'success') {
         $gateFailure = "Pre-deployment validation did not succeed (outcome: $($env:PRECHECK_OUTCOME))."
@@ -299,6 +300,9 @@ if ($configuration) {
                 location=$x.location; computerName=$x.computerName; vmName=$x.name; adminUsername=$x.adminUsername; vmAdminPassword=$env:VM_ADMIN_PASSWORD; vmSize=$x.vmSize; tags=$x.tags; vnetName=$x.vnetName; subnetName=$x.subnetName; nicName=$x.nicName; privateIpAllocationMethod=$x.privateIpAllocationMethod; imagePublisher=$x.imagePublisher; imageOffer=$x.imageOffer; imageSku=$x.imageSku; imageVersion=$x.imageVersion; osDiskStorageAccountType=$x.osDiskStorageAccountType; osDiskCreateOption=$x.osDiskCreateOption; osDiskSizeGB=$x.osDiskSizeGB; enableBootDiagnostics=$x.enableBootDiagnostics
             } 'deploy-vm' $prerequisite
         }
+    } catch {
+        Add-ReportRow 'Orchestration' 'Deployment orchestration' '' 'FAILED' $_.Exception.Message 'orchestration'
+        Write-Error "Unexpected orchestration error: $($_.Exception.Message)" -ErrorAction Continue
     }
 }
 
