@@ -99,124 +99,66 @@ flowchart TD
 
 ## 🔄 CI/CD workflow
 
-The workflow is defined in `.github/workflows/deploy.yml` and is triggered manually using `workflow_dispatch`. It validates `input.json`, authenticates to Azure with OIDC, and runs the per-resource deployment and reporting logic directly inside the workflow steps.
+The workflow in `.github/workflows/deploy.yml` is manually triggered with `workflow_dispatch`. It reads `input.json`, validates the configuration, dynamically builds a separate GitHub Actions matrix for each resource type, and deploys only the objects present in the corresponding arrays.
 
 ```mermaid
 flowchart TD
-    START(["👤 Manual trigger<br/>workflow_dispatch"])
+    START(["👤 Manual trigger"])
+    PREP["🧪 Validate input.json<br/>Build 10 resource matrices"]
+    RG["🏗️ Resource Groups<br/>Matrix stage"]
+    NSG["🛡️ NSGs<br/>Matrix stage"]
+    RT["🛣️ Route Tables<br/>Matrix stage"]
+    VNET["🌐 VNets<br/>Matrix stage"]
+    SUBNET["🧩 Subnets<br/>Matrix stage"]
+    SERVICES["☁️ Key Vault / Storage / SQL / OpenAI<br/>Four independent matrix stages"]
+    VM["🖥️ Virtual Machines<br/>Matrix stage"]
+    REPORT["📊 Consolidate per-resource results"]
+    ARTIFACT["📦 Upload CSV / JSON / Markdown"]
 
-    subgraph CHECKS["🧪 Input validation"]
-        CO["Checkout repository"]
-        VALIDATE["Validate input.json<br/>Required arrays and secrets"]
-        CO --> VALIDATE
-    end
-
-    subgraph IDENTITY["🔐 Azure identity"]
-        LOGIN["Azure OIDC login"]
-        VERIFY["Verify subscription"]
-        LOGIN --> VERIFY
-    end
-
-    subgraph ORCHESTRATION["🚀 Resilient deployment orchestration"]
-        RUN["Inline PowerShell deployment steps<br/>deploy.yml"]
-        RG["Resource Groups"]
-        NET["Networking resources"]
-        SERVICES["Key Vault, Storage, SQL, OpenAI"]
-        VM["Virtual Machines"]
-        RUN --> RG --> NET
-        RG --> SERVICES
-        NET --> VM
-    end
-
-    subgraph REPORTING["📊 Final reporting"]
-        CSV["deployment-report.csv"]
-        JSON["deployment-report.json"]
-        MD["deployment-report.md"]
-        ARTIFACT["Upload bifrost-deployment-report"]
-        CSV --> ARTIFACT
-        JSON --> ARTIFACT
-        MD --> ARTIFACT
-    end
-
-    DONE(["🏁 Run summary"])
-
-    START --> CO
-    VALIDATE --> LOGIN
-    VERIFY --> RUN
-    RG --> CSV
-    NET --> JSON
-    SERVICES --> MD
-    VM --> MD
-    ARTIFACT --> DONE
-
-    classDef gate fill:#164e63,color:#fff,stroke:#22d3ee
-    classDef deploy fill:#14532d,color:#fff,stroke:#4ade80
-    classDef report fill:#581c87,color:#fff,stroke:#c084fc
-    class START,DONE gate
-    class CO,VALIDATE,LOGIN,VERIFY gate
-    class RUN,RG,NET,SERVICES,VM deploy
-    class CSV,JSON,MD,ARTIFACT report
+    START --> PREP --> RG --> NSG --> RT --> VNET --> SUBNET
+    SUBNET --> SERVICES
+    SERVICES --> VM --> REPORT --> ARTIFACT
 ```
 
-### 🧭 Deployment dependency and continuation model
+### 🧭 Matrix stages and dependencies
 
-Each requested resource is attempted independently when its prerequisites are available. A failure is captured as a resource result and does not terminate the orchestration loop. All deployment and reporting logic is maintained directly in `.github/workflows/deploy.yml`; no separate deployment script is required.
+| Stage | Matrix source in `input.json` | Dependency |
+|---|---|---|
+| Resource Groups | `landingZones.resourceGroups` | None; subscription-scope deployment |
+| NSGs | `landingZones.nsgs` | Resource Groups |
+| Route Tables | `landingZones.routeTables` | NSGs stage |
+| VNets | `landingZones.vnets` | Route Tables stage |
+| Subnets | `landingZones.subnets` | VNets; configured NSG and Route Table must exist |
+| Key Vaults | `landingZones.keyVaults` | Subnets stage / resource group availability |
+| Storage Accounts | `landingZones.storageAccounts` | Subnets stage / resource group availability |
+| SQL Databases | `landingZones.sqlDatabases` | Subnets stage / resource group availability |
+| Azure OpenAI | `landingZones.openAiServices` | Subnets stage / resource group availability |
+| Virtual Machines | `landingZones.vms` | Service stages; resource group, VNet and subnet must exist |
 
-```mermaid
-flowchart TD
-    subgraph BASE["🏗️ Resource group foundation"]
-        RG["Resource Groups"]
-    end
+Each resource type has its own job and matrix. If an array contains multiple objects, GitHub Actions creates one matrix job instance per object. Empty arrays receive a no-op placeholder because GitHub Actions does not accept a zero-entry matrix; the placeholder does not deploy anything.
 
-    subgraph NETWORK["🌐 Network resources"]
-        NSG["NSGs"]
-        RT["Route Tables"]
-        VNET["VNets"]
-        SUBNET["Subnets"]
-        NSG --> SUBNET
-        RT --> SUBNET
-        VNET --> SUBNET
-    end
+Every matrix uses `fail-fast: false`. A failed resource does not cancel other instances in its stage. The Key Vault, Storage, SQL and OpenAI stages can run concurrently after the subnet stage. VM deployment starts after those stages and checks its actual network prerequisites before deployment.
 
-    subgraph INDEPENDENT["☁️ Other resource types"]
-        KV["Key Vault"]
-        STORAGE["Storage Accounts"]
-        SQL["SQL Databases"]
-        OAI["Azure OpenAI"]
-    end
+Each matrix instance runs on a fresh `ubuntu-latest` runner, installs Azure CLI, and authenticates independently using `azure/login@v2` with OIDC. Azure login sessions are not shared between jobs.
 
-    subgraph COMPUTE["🖥️ Compute"]
-        VM["Virtual Machines"]
-    end
+### ⚙️ Workflow jobs
 
-    RG --> NSG
-    RG --> RT
-    RG --> VNET
-    RG --> KV
-    RG --> STORAGE
-    RG --> SQL
-    RG --> OAI
-    RG --> VM
-    SUBNET --> VM
+| Job | Purpose |
+|---|---|
+| `prepare` | Validates `input.json`, checks required secrets, and emits dynamic matrices from the requested resource arrays. |
+| `deploy-resource-groups` | Deploys each requested resource group. |
+| `deploy-nsgs` | Deploys each requested NSG. |
+| `deploy-route-tables` | Deploys each requested route table. |
+| `deploy-vnets` | Deploys each requested VNet. |
+| `deploy-subnets` | Deploys each requested subnet after checking its configured dependencies. |
+| `deploy-key-vaults` | Deploys each requested Key Vault. |
+| `deploy-storage-accounts` | Deploys each requested storage account. |
+| `deploy-sql-databases` | Deploys each requested SQL database. |
+| `deploy-openai-services` | Deploys each requested Azure OpenAI account. |
+| `deploy-vms` | Deploys each requested VM after checking its VNet and subnet. |
+| `report` | Downloads per-resource results, fills in missing results as `SKIPPED`, and publishes the consolidated report. |
 
-    classDef foundation fill:#164e63,color:#fff,stroke:#22d3ee
-    classDef resource fill:#14532d,color:#fff,stroke:#4ade80
-    class RG foundation
-    class NSG,RT,VNET,SUBNET,KV,STORAGE,SQL,OAI,VM resource
-```
-
-### ⚙️ Workflow execution stages
-
-| Stage | Job / script | Runner | Main activity |
-|---|---|---|---|
-| 1 | `prechecks` | Ubuntu hosted | Validates JSON structure, required arrays, secrets and subscription GUID |
-| 2 | `azure-login-check` | Windows self-hosted | Azure OIDC login and subscription verification |
-| 3 | `deploy-and-report` | Windows self-hosted | Re-authenticates, invokes the deployment orchestrator, and continues through individual resource failures |
-| 4 | Report upload | Same Windows runner | Publishes CSV, JSON and Markdown reports as a workflow artifact |
-
-The deployment job uses `if: always()` so the report stage can run after failed prechecks or Azure authentication. When a global prerequisite fails, every requested resource is recorded as `SKIPPED` with the relevant reason. The deployment runner re-authenticates because Azure login state is not guaranteed to persist between GitHub Actions jobs.
-
-Each resource deployment runs What-If before create. Errors are caught per resource; resources with unavailable prerequisites are marked `SKIPPED`. The workflow's final status is marked failed if any resource failed or was skipped, but only after the report has been uploaded.
+All deployment steps run What-If before create. Per-resource result files are uploaded with unique artifact names so parallel matrix results do not overwrite one another. The final report job runs even when deployment jobs fail.
 
 ## 📊 Fault-tolerant deployment report
 
