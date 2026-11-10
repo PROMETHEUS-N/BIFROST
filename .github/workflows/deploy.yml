@@ -42,7 +42,7 @@ jobs:
           #   Write-Host "Building $($file.FullName)"
           #   & $az bicep build --file $file.FullName --stdout | Out-Null
           #   if ($LASTEXITCODE -ne 0) { throw "Bicep build failed: $($file.Name)" }
-          }
+          # }
     
       - name: Validate input.json structure
         shell: pwsh
