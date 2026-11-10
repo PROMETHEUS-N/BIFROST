@@ -1,4 +1,4 @@
-name: ❄️ BIFROST | Resilient Infrastructure Deployment
+name: ❄️ BIFROST | Matrix Infrastructure Deployment
 
 on:
   workflow_dispatch:
@@ -8,587 +8,782 @@ permissions:
   id-token: write
 
 jobs:
-  # 🧪 JOB 1 — PRECHECKS
-  # Validates input.json, required resource arrays, GitHub secrets and subscription ID.
-  # This job does not deploy Azure resources.
-  prechecks:
-    name: 🧪 Validate deployment input
+  # 🧪 Build one matrix per resource type from the objects actually present in input.json.
+  prepare:
+    name: 🧪 Validate input and prepare matrices
     runs-on: ubuntu-latest
     environment: dev
+    outputs:
+      resource_groups: ${ steps.matrices.outputs.resource_groups }
+      nsgs: ${ steps.matrices.outputs.nsgs }
+      route_tables: ${ steps.matrices.outputs.route_tables }
+      vnets: ${ steps.matrices.outputs.vnets }
+      subnets: ${ steps.matrices.outputs.subnets }
+      key_vaults: ${ steps.matrices.outputs.key_vaults }
+      storage_accounts: ${ steps.matrices.outputs.storage_accounts }
+      sql_databases: ${ steps.matrices.outputs.sql_databases }
+      openai_services: ${ steps.matrices.outputs.openai_services }
+      vms: ${ steps.matrices.outputs.vms }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Validate input.json and required configuration
+
+      - name: Validate input.json and prepare resource matrices
+        id: matrices
         shell: pwsh
         env:
-          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
-          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
           if ([string]$cfg.environment -ne 'dev') { throw "Expected root environment 'dev'." }
-          $requiredArrays = @('resourceGroups','vnets','subnets','nsgs','routeTables','vms','keyVaults','storageAccounts','sqlDatabases','openAiServices')
-          foreach ($name in $requiredArrays) {
-            if ($null -eq $cfg.landingZones.$name) { throw "landingZones.$name is missing from input.json." }
-          }
-          if (@($cfg.landingZones.resourceGroups).Count -eq 0) { throw 'At least one resource group must be requested.' }
-          foreach ($secretName in @('VM_ADMIN_PASSWORD','SQL_ADMIN_PASSWORD','AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID')) {
+
+          foreach ($secretName in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($secretName))) {
-              throw "Required GitHub secret $secretName is missing."
+              throw "Required GitHub environment secret $secretName is missing."
             }
           }
           if ($env:AZURE_SUBSCRIPTION_ID -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
             throw 'AZURE_SUBSCRIPTION_ID must be a GUID.'
           }
-          Write-Host 'input.json structure and required secrets are valid.'
 
-  # 🔐 JOB 2 — AZURE AUTHENTICATION CHECK
-  # Runs after prechecks. Authenticates to Azure with GitHub OIDC and verifies the target subscription.
-  # Jobs use separate hosted runners, so authentication from this job is not shared with the deployment job.
-  azure-login-check:
-    name: 🔐 Azure OIDC authentication
-    runs-on: ubuntu-latest
-    needs: prechecks
-    if: ${{ needs.prechecks.result == 'success' }}
-    environment: dev
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      # 🌐 Install Azure CLI on this fresh Ubuntu runner using Microsoft's internet-hosted installer.
-      - name: Install Azure CLI
-        shell: bash
-        run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
-      # 🔑 Sign in to Azure using the GitHub OIDC federated identity.
-      - name: Azure login using OIDC
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      # ✅ Confirm that Azure CLI is targeting the subscription supplied through GitHub Secrets.
-      - name: Verify selected subscription
-        shell: pwsh
-        env:
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          az account set --subscription $env:AZURE_SUBSCRIPTION_ID
-          if ($LASTEXITCODE -ne 0) { throw 'Could not select the configured subscription.' }
-          az account show --query '{name:name,id:id,tenantId:tenantId}' --output json
-          if ($LASTEXITCODE -ne 0) { throw 'Azure subscription verification failed.' }
-
-  # 🚀 JOB 3 — RESOURCE DEPLOYMENT AND REPORTING
-  # Runs even if an earlier job fails, so requested resources can be marked SKIPPED with a reason.
-  # This job has its own Ubuntu runner and must authenticate to Azure again.
-  deploy-and-report:
-    name: 🚀 Deploy resources and publish report
-    runs-on: ubuntu-latest
-    needs: [prechecks, azure-login-check]
-    if: ${{ always() }}
-    environment: dev
-    env:
-      PRECHECK_OUTCOME: ${{ needs.prechecks.result }}
-      AZURE_LOGIN_OUTCOME: ${{ needs.azure-login-check.result }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
-      SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      # 🌐 Install Azure CLI from Microsoft's online installer on this separate, fresh Ubuntu runner.
-      - name: Install Azure CLI
-        if: ${{ needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
-        shell: bash
-        run: |
-          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-
-      # 🔁 Authenticate again: Azure login sessions do not carry over between separate jobs/runners.
-      - name: Re-authenticate to Azure on the deployment runner
-        id: azure-login
-        if: ${{ needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
-        continue-on-error: true
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # 🏗️ Process each resource from input.json. A resource-level failure is recorded and does not stop later independent deployments.
-      # 🛟 continue-on-error is an extra safeguard: the PowerShell deployment logic catches expected per-resource errors itself.
-      # It allows later steps (especially fallback report generation and artifact upload) to run if the entire PowerShell step hits an unexpected error.
-      - name: Run fault-tolerant resource deployment
-        id: deployment
-        shell: pwsh
-        continue-on-error: true
-        env:
-          PRECHECK_OUTCOME: ${{ needs.prechecks.result }}
-          AZURE_LOGIN_OUTCOME: ${{ steps.azure-login.outcome }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
-          
-          $repoRoot = $env:GITHUB_WORKSPACE
-          $reportDirectory = Join-Path $repoRoot 'artifacts'
-          New-Item -ItemType Directory -Force -Path $reportDirectory | Out-Null
-          
-          $script:Report = [System.Collections.Generic.List[object]]::new()
-          $script:AzPath = (Get-Command az -ErrorAction SilentlyContinue).Source
-          $script:RunStamp = Get-Date -Format 'yyyyMMddHHmmss'
-          $script:TempCounter = 0
-          
-          function Add-ReportRow {
-              param(
-                  [string]$ResourceType,
-                  [string]$ResourceName,
-                  [string]$ResourceGroup,
-                  [string]$Status,
-                  [string]$Reason,
-                  [string]$DeploymentStage
-              )
-          
-              $script:Report.Add([pscustomobject]@{
-                  ResourceType    = $ResourceType
-                  ResourceName    = $ResourceName
-                  ResourceGroup   = $ResourceGroup
-                  Status          = $Status
-                  Reason          = $Reason
-                  DeploymentStage = $DeploymentStage
-                  TimestampUtc    = (Get-Date).ToUniversalTime().ToString('o')
-              })
-          }
-          
-          function Invoke-AzChecked {
-              param([string[]]$Arguments, [string]$Operation)
-          
-              $output = & $script:AzPath @Arguments 2>&1
-              $exitCode = $LASTEXITCODE
-              $details = ($output | Out-String).Trim()
-              if ($exitCode -ne 0) {
-                  if ([string]::IsNullOrWhiteSpace($details)) { $details = 'Azure CLI returned no error details.' }
-                  throw "$Operation failed (exit code $exitCode): $details"
-              }
-              return $details
-          }
-          
-          function Test-ResourceGroup {
-              param([string]$Name)
-          
-              if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
-              $output = & $script:AzPath group exists --name $Name 2>$null
-              return ($LASTEXITCODE -eq 0 -and "$output".Trim() -eq 'true')
-          }
-          
-          function Test-AzureResource {
-              param([string[]]$Arguments)
-          
-              $null = & $script:AzPath @Arguments 2>$null
-              return ($LASTEXITCODE -eq 0)
-          }
-          
-          function Invoke-ResourceDeployment {
-              param(
-                  [string]$ResourceType,
-                  [string]$ResourceName,
-                  [string]$ResourceGroup,
-                  [string]$Template,
-                  [string]$Scope,
-                  [string]$Location,
-                  [hashtable]$Parameters,
-                  [string]$Stage,
-                  [scriptblock]$PrerequisiteCheck
-              )
-          
-              if ($PrerequisiteCheck) {
-                  $skipReason = & $PrerequisiteCheck
-                  if (-not [string]::IsNullOrWhiteSpace([string]$skipReason)) {
-                      Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'SKIPPED' ([string]$skipReason) $Stage
-                      Write-Warning "$ResourceType '$ResourceName' skipped: $skipReason"
-                      return
-                  }
-              }
-          
-              $parameterFile = $null
-              try {
-                  if ([string]::IsNullOrWhiteSpace($script:AzPath)) {
-                      throw 'Azure CLI (az) was not found on the runner.'
-                  }
-                  if (-not (Test-Path -LiteralPath $Template)) {
-                      throw "Bicep template not found: $Template"
-                  }
-          
-                  $script:TempCounter++
-                  $parameterFile = Join-Path $env:RUNNER_TEMP "bifrost-$($script:TempCounter)-$([guid]::NewGuid().ToString('N')).json"
-                  $parameterDocument = @{
-                      '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
-                      contentVersion = '1.0.0.0'
-                      parameters = @{}
-                  }
-                  foreach ($key in $Parameters.Keys) {
-                      $parameterDocument.parameters[$key] = @{ value = $Parameters[$key] }
-                  }
-                  $parameterDocument | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $parameterFile -Encoding utf8
-          
-                  $deploymentName = "bifrost-$($Stage.ToLowerInvariant())-$($script:RunStamp)-$($script:TempCounter)"
-                  if ($Scope -eq 'subscription') {
-                      $whatIfArgs = @('deployment','sub','what-if','--name',$deploymentName,'--location',$Location,'--template-file',$Template,'--parameters',"@$parameterFile")
-                      $createArgs = @('deployment','sub','create','--name',$deploymentName,'--location',$Location,'--template-file',$Template,'--parameters',"@$parameterFile",'--output','none')
-                  }
-                  else {
-                      $whatIfArgs = @('deployment','group','what-if','--name',$deploymentName,'--resource-group',$ResourceGroup,'--template-file',$Template,'--parameters',"@$parameterFile")
-                      $createArgs = @('deployment','group','create','--name',$deploymentName,'--resource-group',$ResourceGroup,'--template-file',$Template,'--parameters',"@$parameterFile",'--output','none')
-                  }
-          
-                  $null = Invoke-AzChecked $whatIfArgs "$ResourceType '$ResourceName' What-If"
-                  $null = Invoke-AzChecked $createArgs "$ResourceType '$ResourceName' deployment"
-                  Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'DEPLOYED' 'What-If completed and Azure deployment succeeded.' $Stage
-                  Write-Host "DEPLOYED: $ResourceType '$ResourceName'"
-              }
-              catch {
-                  $reason = $_.Exception.Message
-                  Add-ReportRow $ResourceType $ResourceName $ResourceGroup 'FAILED' $reason $Stage
-                  Write-Error "FAILED: $ResourceType '$ResourceName' - $reason" -ErrorAction Continue
-              }
-              finally {
-                  if ($parameterFile -and (Test-Path -LiteralPath $parameterFile)) {
-                      Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
-                  }
-              }
-          }
-          
-          function Get-ResourceGroupSkipReason {
-              param($Item)
-              $rg = [string]$Item.resourceGroupName
-              if ([string]::IsNullOrWhiteSpace($rg)) { return 'resourceGroupName is missing from this input.json object.' }
-              if (-not (Test-ResourceGroup $rg)) { return "Required resource group '$rg' does not exist; its deployment may have failed or it is unavailable." }
-              return $null
-          }
-          
-          function Get-InputItems {
-              param($Configuration, [string]$Property)
-              if ($null -eq $Configuration.landingZones) { return @() }
-              $value = $Configuration.landingZones.$Property
-              if ($null -eq $value) { return @() }
-              return @($value)
-          }
-          
-          function Get-ResourceName {
-              param($Item, [string[]]$Properties)
-              foreach ($property in $Properties) {
-                  if (-not [string]::IsNullOrWhiteSpace([string]$Item.$property)) { return [string]$Item.$property }
-              }
-              return '(name missing)'
-          }
-          
-          $configuration = $null
-          try {
-              $inputPath = Join-Path $repoRoot 'input.json'
-              if (-not (Test-Path -LiteralPath $inputPath)) { throw 'input.json was not found in the repository root.' }
-              $configuration = Get-Content -LiteralPath $inputPath -Raw | ConvertFrom-Json
-          }
-          catch {
-              Add-ReportRow 'Configuration' 'input.json' '' 'FAILED' $_.Exception.Message 'prechecks'
-          }
-          
-          if ($configuration) {
-              $resourceDefinitions = @(
-                  @{ Type='Resource Group'; Property='resourceGroups'; Name=@('rgName','name'); Stage='deploy-rg' },
-                  @{ Type='Network Security Group'; Property='nsgs'; Name=@('name'); Stage='deploy-nsg' },
-                  @{ Type='Route Table'; Property='routeTables'; Name=@('name'); Stage='deploy-route-table' },
-                  @{ Type='Virtual Network'; Property='vnets'; Name=@('name'); Stage='deploy-vnet' },
-                  @{ Type='Subnet'; Property='subnets'; Name=@('name'); Stage='deploy-subnet' },
-                  @{ Type='Key Vault'; Property='keyVaults'; Name=@('name'); Stage='deploy-keyvault' },
-                  @{ Type='Storage Account'; Property='storageAccounts'; Name=@('name'); Stage='deploy-storage' },
-                  @{ Type='SQL Database'; Property='sqlDatabases'; Name=@('databaseName','name'); Stage='deploy-sql' },
-                  @{ Type='Azure OpenAI'; Property='openAiServices'; Name=@('name'); Stage='deploy-openai' },
-                  @{ Type='Virtual Machine'; Property='vms'; Name=@('name'); Stage='deploy-vm' }
-              )
-          
-              $allRequested = @()
-              foreach ($definition in $resourceDefinitions) {
-                  foreach ($item in (Get-InputItems $configuration $definition.Property)) {
-                      $allRequested += [pscustomobject]@{
-                          Definition = $definition
-                          Item = $item
-                          Name = Get-ResourceName $item $definition.Name
-                      }
-                  }
-              }
-          
-              try {
-              $gateFailure = $null
-              if ($env:PRECHECK_OUTCOME -ne 'success') {
-                  $gateFailure = "Pre-deployment validation did not succeed (outcome: $($env:PRECHECK_OUTCOME))."
-              }
-              elseif ($env:AZURE_LOGIN_OUTCOME -ne 'success') {
-                  $gateFailure = "Azure OIDC login did not succeed (outcome: $($env:AZURE_LOGIN_OUTCOME))."
-              }
-          
-              if ($gateFailure) {
-                  foreach ($entry in $allRequested) {
-                      $rg = [string]$entry.Item.resourceGroupName
-                      Add-ReportRow $entry.Definition.Type $entry.Name $rg 'SKIPPED' $gateFailure $entry.Definition.Stage
-                  }
-              }
-              else {
-                  $tenantId = (Invoke-AzChecked @('account','show','--query','tenantId','--output','tsv') 'Read Azure tenant ID').Trim()
-          
-                  foreach ($x in (Get-InputItems $configuration 'resourceGroups')) {
-                      $name = Get-ResourceName $x @('rgName','name')
-                      Invoke-ResourceDeployment 'Resource Group' $name '' 'modules/RG/resourcegroup.bicep' 'subscription' ([string]$x.location) @{
-                          rgname=$x.rgName; location=$x.location; tags=$x.tags
-                      } 'deploy-rg'
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'nsgs')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Network Security Group' $name ([string]$x.resourceGroupName) 'modules/networking/nsg.bicep' 'group' ([string]$x.location) @{
-                          location=$x.location; nsgName=$x.name; securityRules=@($x.securityRules); tags=$x.tags
-                      } 'deploy-nsg' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'routeTables')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Route Table' $name ([string]$x.resourceGroupName) 'modules/networking/routetable.bicep' 'group' ([string]$x.location) @{
-                          routeTableName=$x.name; location=$x.location; disableBgpRoutePropagation=$x.disableBgpRoutePropagation; routes=@($x.routes); tags=$x.tags
-                      } 'deploy-route-table' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'vnets')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Virtual Network' $name ([string]$x.resourceGroupName) 'modules/networking/vnet.bicep' 'group' ([string]$x.location) @{
-                          location=$x.location; vnetName=$x.name; addressPrefixes=@($x.addressPrefixes); tags=$x.tags; dnsServers=@($x.dnsServers); subnets=@()
-                      } 'deploy-vnet' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'subnets')) {
-                      $name = Get-ResourceName $x @('name')
-                      $prerequisite = {
-                          $rgReason = Get-ResourceGroupSkipReason $x
-                          if ($rgReason) { return $rgReason }
-                          if (-not (Test-AzureResource @('network','vnet','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.vnetName,'--output','none'))) {
-                              return "Required VNet '$($x.vnetName)' is unavailable."
-                          }
-                          if (-not [string]::IsNullOrWhiteSpace([string]$x.networkSecurityGroupName) -and -not (Test-AzureResource @('network','nsg','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.networkSecurityGroupName,'--output','none'))) {
-                              return "Required NSG '$($x.networkSecurityGroupName)' is unavailable."
-                          }
-                          if (-not [string]::IsNullOrWhiteSpace([string]$x.routeTableName) -and -not (Test-AzureResource @('network','route-table','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.routeTableName,'--output','none'))) {
-                              return "Required route table '$($x.routeTableName)' is unavailable."
-                          }
-                          return $null
-                      }.GetNewClosure()
-                      Invoke-ResourceDeployment 'Subnet' $name ([string]$x.resourceGroupName) 'modules/networking/subnet.bicep' 'group' ([string]$x.location) @{
-                          vnetName=$x.vnetName; subnetName=$x.name; addressPrefix=$x.addressPrefix; networkSecurityGroupName=$x.networkSecurityGroupName; routeTableName=$x.routeTableName; serviceEndpoints=@($x.serviceEndpoints); privateEndpointNetworkPolicies=$x.privateEndpointNetworkPolicies; privateLinkServiceNetworkPolicies=$x.privateLinkServiceNetworkPolicies
-                      } 'deploy-subnet' $prerequisite
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'keyVaults')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Key Vault' $name ([string]$x.resourceGroupName) 'modules/security/keyvault.bicep' 'group' ([string]$x.location) @{
-                          keyVaultName=$x.name; location=$x.location; tenantId=$tenantId; skuName=$x.skuName; skuFamily=$x.skuFamily; enableRbacAuthorization=$x.enableRbacAuthorization; enablePurgeProtection=$x.enablePurgeProtection; softDeleteRetentionInDays=$x.softDeleteRetentionInDays; publicNetworkAccess=$x.publicNetworkAccess; tags=$x.tags
-                      } 'deploy-keyvault' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'storageAccounts')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Storage Account' $name ([string]$x.resourceGroupName) 'modules/storage/storageAccount.bicep' 'group' ([string]$x.location) @{
-                          storageAccountName=$x.name; location=$x.location; tags=$x.tags; skuName=$x.skuName; kind=$x.kind; accessTier=$x.accessTier; minimumTlsVersion=$x.minimumTlsVersion; supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly; allowBlobPublicAccess=$x.allowBlobPublicAccess; allowSharedKeyAccess=$x.allowSharedKeyAccess; publicNetworkAccess=$x.publicNetworkAccess; containerNames=@($x.containerNames); blobServiceName=$x.blobServiceName; containerPublicAccess=$x.containerPublicAccess
-                      } 'deploy-storage' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'sqlDatabases')) {
-                      $name = Get-ResourceName $x @('databaseName','name')
-                      Invoke-ResourceDeployment 'SQL Database' $name ([string]$x.resourceGroupName) 'modules/database/sql.bicep' 'group' ([string]$x.location) @{
-                          location=$x.location; serverName=$x.serverName; databaseName=$x.databaseName; administratorLogin=$x.administratorLogin; administratorLoginPassword=$env:SQL_ADMIN_PASSWORD; sqlServerVersion=$x.sqlServerVersion; databaseSkuName=$x.databaseSkuName; databaseSkuTier=$x.databaseSkuTier; databaseCapacity=$x.databaseCapacity; databaseMaxSizeBytes=$x.databaseMaxSizeBytes; publicNetworkAccess=$x.publicNetworkAccess; minimumTlsVersion=$x.minimumTlsVersion; tags=$x.tags
-                      } 'deploy-sql' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'openAiServices')) {
-                      $name = Get-ResourceName $x @('name')
-                      Invoke-ResourceDeployment 'Azure OpenAI' $name ([string]$x.resourceGroupName) 'modules/ai/openai.bicep' 'group' ([string]$x.location) @{
-                          accountName=$x.name; location=$x.location; skuName=$x.skuName; customSubDomainName=$x.customSubDomainName; publicNetworkAccess=$x.publicNetworkAccess; tags=$x.tags
-                      } 'deploy-openai' { Get-ResourceGroupSkipReason $x }
-                  }
-          
-                  foreach ($x in (Get-InputItems $configuration 'vms')) {
-                      $name = Get-ResourceName $x @('name')
-                      $prerequisite = {
-                          $rgReason = Get-ResourceGroupSkipReason $x
-                          if ($rgReason) { return $rgReason }
-                          if (-not (Test-AzureResource @('network','vnet','show','--resource-group',[string]$x.resourceGroupName,'--name',[string]$x.vnetName,'--output','none'))) {
-                              return "Required VNet '$($x.vnetName)' is unavailable."
-                          }
-                          if (-not (Test-AzureResource @('network','vnet','subnet','show','--resource-group',[string]$x.resourceGroupName,'--vnet-name',[string]$x.vnetName,'--name',[string]$x.subnetName,'--output','none'))) {
-                              return "Required subnet '$($x.subnetName)' in VNet '$($x.vnetName)' is unavailable."
-                          }
-                          return $null
-                      }.GetNewClosure()
-                      Invoke-ResourceDeployment 'Virtual Machine' $name ([string]$x.resourceGroupName) 'modules/compute/vm.bicep' 'group' ([string]$x.location) @{
-                          location=$x.location; computerName=$x.computerName; vmName=$x.name; adminUsername=$x.adminUsername; vmAdminPassword=$env:VM_ADMIN_PASSWORD; vmSize=$x.vmSize; tags=$x.tags; vnetName=$x.vnetName; subnetName=$x.subnetName; nicName=$x.nicName; privateIpAllocationMethod=$x.privateIpAllocationMethod; imagePublisher=$x.imagePublisher; imageOffer=$x.imageOffer; imageSku=$x.imageSku; imageVersion=$x.imageVersion; osDiskStorageAccountType=$x.osDiskStorageAccountType; osDiskCreateOption=$x.osDiskCreateOption; osDiskSizeGB=$x.osDiskSizeGB; enableBootDiagnostics=$x.enableBootDiagnostics
-                      } 'deploy-vm' $prerequisite
-                  }
-              } catch {
-                  Add-ReportRow 'Orchestration' 'Deployment orchestration' '' 'FAILED' $_.Exception.Message 'orchestration'
-                  Write-Error "Unexpected orchestration error: $($_.Exception.Message)" -ErrorAction Continue
-              }
-          }
-          
-          # Ensure every configured object has exactly one report row, including objects
-          # not reached because a global precondition or an unexpected orchestration error occurred.
-          if ($configuration) {
-              foreach ($definition in $resourceDefinitions) {
-                  foreach ($item in (Get-InputItems $configuration $definition.Property)) {
-                      $resourceName = Get-ResourceName $item $definition.Name
-                      $alreadyReported = @($script:Report | Where-Object {
-                          $_.ResourceType -eq $definition.Type -and
-                          $_.ResourceName -eq $resourceName -and
-                          $_.ResourceGroup -eq [string]$item.resourceGroupName
-                      }).Count -gt 0
-                      if (-not $alreadyReported) {
-                          Add-ReportRow $definition.Type $resourceName ([string]$item.resourceGroupName) 'SKIPPED' 'No deployment attempt was recorded; check precheck, authentication, or orchestration errors in the workflow log.' $definition.Stage
-                      }
-                  }
-              }
-          }
-          
-          $csvPath = Join-Path $reportDirectory 'deployment-report.csv'
-          $jsonPath = Join-Path $reportDirectory 'deployment-report.json'
-          $markdownPath = Join-Path $reportDirectory 'deployment-report.md'
-          
-          $script:Report | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding utf8
-          $script:Report | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $jsonPath -Encoding utf8
-          
-          $deployed = @($script:Report | Where-Object Status -eq 'DEPLOYED').Count
-          $failed = @($script:Report | Where-Object Status -eq 'FAILED').Count
-          $skipped = @($script:Report | Where-Object Status -eq 'SKIPPED').Count
-          
-          $markdown = @(
-              '# ❄️ BIFROST Deployment Report'
-              ''
-              "- **Workflow run:** $env:GITHUB_RUN_ID"
-              "- **Commit:** $env:GITHUB_SHA"
-              "- **Generated (UTC):** $((Get-Date).ToUniversalTime().ToString('o'))"
-              ''
-              '## Summary'
-              ''
-              "| Total | Deployed | Failed | Skipped |"
-              '|---:|---:|---:|---:|'
-              "| $($script:Report.Count) | $deployed | $failed | $skipped |"
-              ''
-              '## Resource details'
-              ''
-              '| Type | Resource | Resource group | Status | Reason |'
-              '|---|---|---|---|---|'
+          $definitions = @(
+            @{ Key='resourceGroups'; Output='resource_groups'; Name='rgName' },
+            @{ Key='nsgs'; Output='nsgs'; Name='name' },
+            @{ Key='routeTables'; Output='route_tables'; Name='name' },
+            @{ Key='vnets'; Output='vnets'; Name='name' },
+            @{ Key='subnets'; Output='subnets'; Name='name' },
+            @{ Key='keyVaults'; Output='key_vaults'; Name='name' },
+            @{ Key='storageAccounts'; Output='storage_accounts'; Name='name' },
+            @{ Key='sqlDatabases'; Output='sql_databases'; Name='databaseName' },
+            @{ Key='openAiServices'; Output='openai_services'; Name='name' },
+            @{ Key='vms'; Output='vms'; Name='name' }
           )
-          foreach ($row in $script:Report) {
-              $safeReason = ([string]$row.Reason -replace '\|','\|' -replace '\r?\n',' ')
-              $markdown += "| $($row.ResourceType) | $($row.ResourceName) | $($row.ResourceGroup) | **$($row.Status)** | $safeReason |"
-          }
-          $markdown | Set-Content -LiteralPath $markdownPath -Encoding utf8
-          
-          if ($env:GITHUB_STEP_SUMMARY) {
-              @(
-                  '## ❄️ BIFROST deployment summary'
-                  ''
-                  "| Total | Deployed | Failed | Skipped |"
-                  '|---:|---:|---:|---:|'
-                  "| $($script:Report.Count) | $deployed | $failed | $skipped |"
-                  ''
-                  'Full CSV, JSON and Markdown reports are available in the **bifrost-deployment-report** workflow artifact.'
-              ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
-          }
-          
-          Write-Host "Deployment report generated. Total=$($script:Report.Count), Deployed=$deployed, Failed=$failed, Skipped=$skipped."
-          
 
-      # 🧾 Create a fallback report for every requested resource if the main deployment/report step did not create its files.
-      - name: Create fallback report if deployment script did not produce one
-        if: ${{ always() }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path 'artifacts' | Out-Null
-          if (-not (Test-Path 'artifacts/deployment-report.csv')) {
-            $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
-            $definitions = @(
-              @{Type='Resource Group';Key='resourceGroups';Name='rgName'},
-              @{Type='Network Security Group';Key='nsgs';Name='name'},
-              @{Type='Route Table';Key='routeTables';Name='name'},
-              @{Type='Virtual Network';Key='vnets';Name='name'},
-              @{Type='Subnet';Key='subnets';Name='name'},
-              @{Type='Key Vault';Key='keyVaults';Name='name'},
-              @{Type='Storage Account';Key='storageAccounts';Name='name'},
-              @{Type='SQL Database';Key='sqlDatabases';Name='databaseName'},
-              @{Type='Azure OpenAI';Key='openAiServices';Name='name'},
-              @{Type='Virtual Machine';Key='vms';Name='name'}
-            )
-            $rows = @()
-            foreach ($definition in $definitions) {
-              foreach ($item in @($cfg.landingZones.$($definition.Key))) {
-                $rows += [pscustomobject]@{
-                  ResourceType=$definition.Type
-                  ResourceName=[string]$item.$($definition.Name)
-                  ResourceGroup=[string]$item.resourceGroupName
-                  Status='SKIPPED'
-                  Reason='Deployment script did not produce a report. Inspect the deployment step logs.'
-                  DeploymentStage='fallback'
-                  TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')
-                }
+          foreach ($definition in $definitions) {
+            $items = @($cfg.landingZones.($definition.Key))
+            if ($null -eq $cfg.landingZones.($definition.Key)) { $items = @() }
+
+            if ($definition.Key -eq 'resourceGroups' -and $items.Count -eq 0) {
+              throw 'At least one resource group must be requested.'
+            }
+            if ($definition.Key -eq 'vms' -and $items.Count -gt 0 -and [string]::IsNullOrWhiteSpace($env:VM_ADMIN_PASSWORD)) {
+              throw 'VM_ADMIN_PASSWORD is required because input.json requests one or more VMs.'
+            }
+            if ($definition.Key -eq 'sqlDatabases' -and $items.Count -gt 0 -and [string]::IsNullOrWhiteSpace($env:SQL_ADMIN_PASSWORD)) {
+              throw 'SQL_ADMIN_PASSWORD is required because input.json requests one or more SQL databases.'
+            }
+
+            $include = @()
+            for ($index = 0; $index -lt $items.Count; $index++) {
+              $itemJson = ConvertTo-Json -InputObject $items[$index] -Depth 100 -Compress
+              $resourceName = [string]$items[$index].($definition.Name)
+              if ([string]::IsNullOrWhiteSpace($resourceName)) { throw "A resource in landingZones.$($definition.Key) is missing '$($definition.Name)'." }
+              $include += @{
+                item = $itemJson
+                resourceName = $resourceName
+                artifact = "$($definition.Output)-$index"
+                skip = $false
               }
             }
-            $rows | Export-Csv 'artifacts/deployment-report.csv' -NoTypeInformation -Encoding utf8
-            $rows | ConvertTo-Json -Depth 10 | Set-Content 'artifacts/deployment-report.json' -Encoding utf8
-            @('# BIFROST Deployment Report','','Fallback report: deployment script did not complete. Inspect workflow logs.','','| Type | Resource | Resource group | Status | Reason |','|---|---|---|---|---|') +
-              @($rows | ForEach-Object { "| $($_.ResourceType) | $($_.ResourceName) | $($_.ResourceGroup) | $($_.Status) | $($_.Reason) |" }) |
-              Set-Content 'artifacts/deployment-report.md' -Encoding utf8
+
+            # GitHub Actions does not accept an empty matrix. A single no-op entry represents an empty resource array.
+            if ($include.Count -eq 0) {
+              $include = @(@{ item='{}'; resourceName='No resources requested'; artifact="$($definition.Output)-empty"; skip=$true })
+            }
+
+            $matrixJson = ConvertTo-Json -InputObject @{ include = $include } -Depth 100 -Compress
+            " $($definition.Output)=$matrixJson".Trim() | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            Write-Host "$($definition.Key): $($items.Count) requested resource(s)."
           }
 
-          if (-not (Test-Path 'artifacts/deployment-report.json')) {
-            Import-Csv 'artifacts/deployment-report.csv' | ConvertTo-Json -Depth 10 |
-              Set-Content 'artifacts/deployment-report.json' -Encoding utf8
-          }
-          if (-not (Test-Path 'artifacts/deployment-report.md')) {
-            $report = Import-Csv 'artifacts/deployment-report.csv'
-            $lines = @(
-              '# ❄️ BIFROST Deployment Report'
-              ''
-              '| Type | Resource | Resource group | Status | Reason |'
-              '|---|---|---|---|---|'
-            )
-            $lines += @($report | ForEach-Object {
-              "| $($_.ResourceType) | $($_.ResourceName) | $($_.ResourceGroup) | $($_.Status) | $($_.Reason) |"
-            })
-            $lines | Set-Content 'artifacts/deployment-report.md' -Encoding utf8
-          }
+  # 🔐 Resource Group stage. Every matrix instance gets its own runner and Azure OIDC session.
+  deploy-resource-groups:
+    name: 🏗️ Resource Group / ${{ matrix.resourceName }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.resource_groups) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Resource Group
+        if: ${{ !matrix.skip }}
+        id: deploy
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          DEPLOYMENT_KIND: resourceGroups
+        run: |
+                    $ErrorActionPreference = 'Stop'
+          $x = $env:RESOURCE_JSON | ConvertFrom-Json
+          $status = 'FAILED'; $reason = ''
+          try {
+            $params = @{ rgname=$x.rgName; location=$x.location; tags=$x.tags }
+            $file = Join-Path $env:RUNNER_TEMP 'parameters.json'
+            @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} } | ConvertTo-Json -Depth 100 | Set-Content $file
+            $doc = Get-Content $file -Raw | ConvertFrom-Json -AsHashtable
+            foreach ($k in $params.Keys) { $doc.parameters[$k] = @{ value=$params[$k] } }
+            $doc | ConvertTo-Json -Depth 100 | Set-Content $file
+            $name = "bifrost-rg-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment sub what-if --name $name --location $x.location --template-file modules/RG/resourcegroup.bicep --parameters "@$file"
+            if ($LASTEXITCODE -ne 0) { throw 'Resource Group What-If failed.' }
+            az deployment sub create --name $name --location $x.location --template-file modules/RG/resourcegroup.bicep --parameters "@$file" --output none
+            if ($LASTEXITCODE -ne 0) { throw 'Resource Group deployment failed.' }
+            $status='DEPLOYED'; $reason='Subscription-scope What-If and deployment succeeded.'
+          } catch { $reason=$_.Exception.Message; Write-Error $reason -ErrorAction Continue }
+          $row = [pscustomobject]@{ ResourceType='Resource Group'; ResourceName=$env:RESOURCE_NAME; ResourceGroup=''; Status=$status; Reason=$reason; DeploymentStage='deploy-resource-groups'; TimestampUtc=(Get-Date).ToUniversalTime().ToString('o') }
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $row | ConvertTo-Json -Depth 20 | Set-Content artifacts/result.json
+          if ($status -eq 'FAILED') { exit 1 }
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No resource groups requested; no deployment performed."
 
-      # 📦 Upload CSV, JSON and Markdown reports as a downloadable GitHub Actions artifact.
-      - name: Upload complete deployment report
+  # 🌐 NSGs follow Resource Groups.
+  deploy-nsgs:
+    name: 🛡️ NSG / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-resource-groups]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.nsgs) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        shell: bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy NSG
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+          ARTIFACT_KEY: ${{ matrix.artifact }}
+        run: |
+          $ErrorActionPreference='Stop'; $x=$env:RESOURCE_JSON | ConvertFrom-Json
+          $status='FAILED'; $reason=''
+          try {
+            if (-not (az group exists --name $x.resourceGroupName | ConvertFrom-Json)) { throw "Resource group '$($x.resourceGroupName)' is unavailable." }
+            $p=@{ location=$x.location; nsgName=$x.name; securityRules=@($x.securityRules); tags=$x.tags }
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json'
+            $d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}}
+            $d | ConvertTo-Json -Depth 100 | Set-Content $f
+            $n="bifrost-nsg-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/networking/nsg.bicep --parameters "@$f"
+            if($LASTEXITCODE -ne 0){throw 'NSG What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/networking/nsg.bicep --parameters "@$f" --output none
+            if($LASTEXITCODE -ne 0){throw 'NSG deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          } catch {$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          [pscustomobject]@{ResourceType='Network Security Group';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-nsgs';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')} | ConvertTo-Json -Depth 20 | Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No NSGs requested."
+
+  # 🛣️ Route Tables follow NSGs.
+  deploy-route-tables:
+    name: 🛣️ Route Table / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-nsgs]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.route_tables) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Route Table
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName | ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $p=@{routeTableName=$x.name;location=$x.location;disableBgpRoutePropagation=$x.disableBgpRoutePropagation;routes=@($x.routes);tags=$x.tags}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-rt-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/networking/routetable.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'Route Table What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/networking/routetable.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'Route Table deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Route Table';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-route-tables';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No Route Tables requested."
+
+  # 🌐 VNets follow route tables.
+  deploy-vnets:
+    name: 🌐 VNet / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-route-tables]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.vnets) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy VNet
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName | ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $p=@{location=$x.location;vnetName=$x.name;addressPrefixes=@($x.addressPrefixes);tags=$x.tags;dnsServers=@($x.dnsServers);subnets=@()}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-vnet-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/networking/vnet.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'VNet What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/networking/vnet.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'VNet deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Virtual Network';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No VNets requested."
+
+  # 🧩 Subnets require their VNet and any named NSG/Route Table.
+  deploy-subnets:
+    name: 🧩 Subnet / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-vnets]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.subnets) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Subnet
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            if(-not (az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output none 2>$null; $LASTEXITCODE -eq 0)){throw "Required VNet '$($x.vnetName)' is unavailable."}
+            if($x.networkSecurityGroupName -and (az network nsg show --resource-group $x.resourceGroupName --name $x.networkSecurityGroupName --output none 2>$null; $LASTEXITCODE -ne 0)){throw "Required NSG '$($x.networkSecurityGroupName)' is unavailable."}
+            if($x.routeTableName -and (az network route-table show --resource-group $x.resourceGroupName --name $x.routeTableName --output none 2>$null; $LASTEXITCODE -ne 0)){throw "Required Route Table '$($x.routeTableName)' is unavailable."}
+            $p=@{vnetName=$x.vnetName;subnetName=$x.name;addressPrefix=$x.addressPrefix;networkSecurityGroupName=$x.networkSecurityGroupName;routeTableName=$x.routeTableName;serviceEndpoints=@($x.serviceEndpoints);privateEndpointNetworkPolicies=$x.privateEndpointNetworkPolicies;privateLinkServiceNetworkPolicies=$x.privateLinkServiceNetworkPolicies}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-subnet-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/networking/subnet.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'Subnet What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/networking/subnet.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'Subnet deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Subnet';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-subnets';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No Subnets requested."
+
+  # 🔐 Independent service stages begin after networking. They run in parallel with one another.
+  deploy-key-vaults:
+    name: 🔐 Key Vault / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-subnets]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.key_vaults) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Key Vault
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $tenant=(az account show --query tenantId -o tsv).Trim()
+            $p=@{keyVaultName=$x.name;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-kv-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/security/keyvault.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'Key Vault What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/security/keyvault.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'Key Vault deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Key Vault';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-key-vaults';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No Key Vaults requested."
+
+  deploy-storage-accounts:
+    name: 💾 Storage Account / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-subnets]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.storage_accounts) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Storage Account
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $p=@{storageAccountName=$x.name;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-storage-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/storage/storageAccount.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'Storage What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/storage/storageAccount.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'Storage deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Storage Account';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-storage-accounts';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No Storage Accounts requested."
+
+  deploy-sql-databases:
+    name: 🗄️ SQL Database / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-subnets]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.sql_databases) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy SQL Database
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $p=@{location=$x.location;serverName=$x.serverName;databaseName=$x.databaseName;administratorLogin=$x.administratorLogin;administratorLoginPassword=$env:SQL_ADMIN_PASSWORD;sqlServerVersion=$x.sqlServerVersion;databaseSkuName=$x.databaseSkuName;databaseSkuTier=$x.databaseSkuTier;databaseCapacity=$x.databaseCapacity;databaseMaxSizeBytes=$x.databaseMaxSizeBytes;publicNetworkAccess=$x.publicNetworkAccess;minimumTlsVersion=$x.minimumTlsVersion;tags=$x.tags}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-sql-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/database/sql.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'SQL What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/database/sql.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'SQL deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='SQL Database';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-sql-databases';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No SQL Databases requested."
+
+  deploy-openai-services:
+    name: 🤖 Azure OpenAI / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-subnets]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJSON(needs.prepare.outputs.openai_services) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy Azure OpenAI
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            $p=@{accountName=$x.name;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-oai-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/ai/openai.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'Azure OpenAI What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/ai/openai.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'Azure OpenAI deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Azure OpenAI';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-openai-services';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No Azure OpenAI services requested."
+
+  # 🖥️ VMs run after all service stages and require their configured VNet and subnet to exist.
+  deploy-vms:
+    name: 🖥️ VM / ${{ matrix.resourceName }}
+    needs: [prepare, deploy-key-vaults, deploy-storage-accounts, deploy-sql-databases, deploy-openai-services]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.vms) }}
+    steps:
+      - name: Checkout repository
+        if: ${{ !matrix.skip }}
+        uses: actions/checkout@v4
+      - name: Install Azure CLI
+        if: ${{ !matrix.skip }}
+        shell: bash
+        run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      - name: Azure login using OIDC
+        if: ${{ !matrix.skip }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Deploy VM
+        if: ${{ !matrix.skip }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          RESOURCE_JSON: ${{ matrix.item }}
+          RESOURCE_NAME: ${{ matrix.resourceName }}
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference='Stop';$x=$env:RESOURCE_JSON|ConvertFrom-Json;$status='FAILED';$reason=''
+          try {
+            if((az group exists --name $x.resourceGroupName|ConvertFrom-Json) -ne $true){throw "Resource group '$($x.resourceGroupName)' is unavailable."}
+            if((az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output none 2>$null; $LASTEXITCODE -eq 0) -ne $true){throw "Required VNet '$($x.vnetName)' is unavailable."}
+            if((az network vnet subnet show --resource-group $x.resourceGroupName --vnet-name $x.vnetName --name $x.subnetName --output none 2>$null; $LASTEXITCODE -eq 0) -ne $true){throw "Required subnet '$($x.subnetName)' is unavailable."}
+            $p=@{location=$x.location;computerName=$x.computerName;vmName=$x.name;adminUsername=$x.adminUsername;vmAdminPassword=$env:VM_ADMIN_PASSWORD;vmSize=$x.vmSize;tags=$x.tags;vnetName=$x.vnetName;subnetName=$x.subnetName;nicName=$x.nicName;privateIpAllocationMethod=$x.privateIpAllocationMethod;imagePublisher=$x.imagePublisher;imageOffer=$x.imageOffer;imageSku=$x.imageSku;imageVersion=$x.imageVersion;osDiskStorageAccountType=$x.osDiskStorageAccountType;osDiskCreateOption=$x.osDiskCreateOption;osDiskSizeGB=$x.osDiskSizeGB;enableBootDiagnostics=$x.enableBootDiagnostics}
+            $f=Join-Path $env:RUNNER_TEMP 'parameters.json';$d=@{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            foreach($k in $p.Keys){$d.parameters[$k]=@{value=$p[$k]}};$d|ConvertTo-Json -Depth 100|Set-Content $f
+            $n="bifrost-vm-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+            az deployment group what-if --name $n --resource-group $x.resourceGroupName --template-file modules/compute/vm.bicep --parameters "@$f";if($LASTEXITCODE -ne 0){throw 'VM What-If failed.'}
+            az deployment group create --name $n --resource-group $x.resourceGroupName --template-file modules/compute/vm.bicep --parameters "@$f" --output none;if($LASTEXITCODE -ne 0){throw 'VM deployment failed.'}
+            $status='DEPLOYED';$reason='What-If and deployment succeeded.'
+          }catch{$reason=$_.Exception.Message;Write-Error $reason -ErrorAction Continue}
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          [pscustomobject]@{ResourceType='Virtual Machine';ResourceName=$env:RESOURCE_NAME;ResourceGroup=$x.resourceGroupName;Status=$status;Reason=$reason;DeploymentStage='deploy-vms';TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Depth 20|Set-Content artifacts/result.json
+          if($status -eq 'FAILED'){exit 1}
+      - name: Upload resource result
+        if: ${{ always() && !matrix.skip }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-result-${{ matrix.artifact }}
+          path: artifacts/result.json
+          if-no-files-found: error
+      - name: Skip empty matrix placeholder
+        if: ${{ matrix.skip }}
+        run: echo "No VMs requested."
+
+  # 📊 Aggregate per-resource matrix results. Missing result files become SKIPPED rows.
+  report:
+    name: 📊 Consolidate deployment report
+    needs: [prepare, deploy-resource-groups, deploy-nsgs, deploy-route-tables, deploy-vnets, deploy-subnets, deploy-key-vaults, deploy-storage-accounts, deploy-sql-databases, deploy-openai-services, deploy-vms]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download matrix result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bifrost-result-*
+          path: matrix-results
+          merge-multiple: true
+      - name: Build consolidated CSV, JSON and Markdown reports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $cfg=Get-Content input.json -Raw|ConvertFrom-Json
+          $definitions=@(
+            @{Key='resourceGroups';Type='Resource Group';Name='rgName';Stage='deploy-resource-groups'},
+            @{Key='nsgs';Type='Network Security Group';Name='name';Stage='deploy-nsgs'},
+            @{Key='routeTables';Type='Route Table';Name='name';Stage='deploy-route-tables'},
+            @{Key='vnets';Type='Virtual Network';Name='name';Stage='deploy-vnets'},
+            @{Key='subnets';Type='Subnet';Name='name';Stage='deploy-subnets'},
+            @{Key='keyVaults';Type='Key Vault';Name='name';Stage='deploy-key-vaults'},
+            @{Key='storageAccounts';Type='Storage Account';Name='name';Stage='deploy-storage-accounts'},
+            @{Key='sqlDatabases';Type='SQL Database';Name='databaseName';Stage='deploy-sql-databases'},
+            @{Key='openAiServices';Type='Azure OpenAI';Name='name';Stage='deploy-openai-services'},
+            @{Key='vms';Type='Virtual Machine';Name='name';Stage='deploy-vms'}
+          )
+          $rows=@()
+          if(Test-Path matrix-results){
+            foreach($file in Get-ChildItem matrix-results -Filter '*.json' -File){
+              try{$rows+=Get-Content $file.FullName -Raw|ConvertFrom-Json}catch{Write-Warning "Could not parse result file $($file.Name): $($_.Exception.Message)"}
+            }
+          }
+          foreach($definition in $definitions){
+            foreach($item in @($cfg.landingZones.($definition.Key))){
+              $resourceName=[string]$item.($definition.Name)
+              $found=@($rows|Where-Object{$_.ResourceType -eq $definition.Type -and $_.ResourceName -eq $resourceName -and $_.ResourceGroup -eq [string]$item.resourceGroupName}).Count -gt 0
+              if(-not $found){
+                $rows+= [pscustomobject]@{ResourceType=$definition.Type;ResourceName=$resourceName;ResourceGroup=[string]$item.resourceGroupName;Status='SKIPPED';Reason='No matrix result was uploaded. Inspect the corresponding stage, prerequisite, or runner logs.';DeploymentStage=$definition.Stage;TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')}
+              }
+            }
+          }
+          New-Item -ItemType Directory -Force artifacts|Out-Null
+          $rows|Export-Csv artifacts/deployment-report.csv -NoTypeInformation -Encoding utf8
+          $rows|ConvertTo-Json -Depth 30|Set-Content artifacts/deployment-report.json
+          $deployed=@($rows|Where-Object Status -eq 'DEPLOYED').Count
+          $failed=@($rows|Where-Object Status -eq 'FAILED').Count
+          $skipped=@($rows|Where-Object Status -eq 'SKIPPED').Count
+          $lines=@('# ❄️ BIFROST Deployment Report','','| Total | Deployed | Failed | Skipped |','|---:|---:|---:|---:|',"| $($rows.Count) | $deployed | $failed | $skipped |",'','| Type | Resource | Resource group | Stage | Status | Reason |','|---|---|---|---|---|---|')
+          foreach($row in $rows){$reason=([string]$row.Reason -replace '\|','\|' -replace '\r?\n',' ');$lines+="| $($row.ResourceType) | $($row.ResourceName) | $($row.ResourceGroup) | $($row.DeploymentStage) | **$($row.Status)** | $reason |"}
+          $lines|Set-Content artifacts/deployment-report.md -Encoding utf8
+          @('## ❄️ BIFROST deployment summary','',"| Total | Deployed | Failed | Skipped |",'|---:|---:|---:|---:|',"| $($rows.Count) | $deployed | $failed | $skipped |",'','Full CSV, JSON and Markdown reports are available in the **bifrost-deployment-report** artifact.')|Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload consolidated deployment report
         id: upload-report
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: bifrost-deployment-report
-          path: |
-            artifacts/deployment-report.csv
-            artifacts/deployment-report.json
-            artifacts/deployment-report.md
+          path: artifacts/deployment-report.*
           if-no-files-found: error
           retention-days: 90
-      # 🏁 Evaluate the final result only after the artifact upload. Fail the workflow if any resource FAILED or was SKIPPED.
-      - name: Mark run failed when resources failed or were skipped
+      - name: Fail workflow when any resource failed or was skipped
         if: ${{ always() && steps.upload-report.outcome == 'success' }}
         shell: pwsh
         run: |
-          $report = Import-Csv 'artifacts/deployment-report.csv'
-          $failed = @($report | Where-Object Status -eq 'FAILED')
-          $skipped = @($report | Where-Object Status -eq 'SKIPPED')
-          Write-Host "Deployed: $(@($report | Where-Object Status -eq 'DEPLOYED').Count)"
-          Write-Host "Failed: $($failed.Count)"
-          Write-Host "Skipped: $($skipped.Count)"
-          if ($failed.Count -gt 0 -or $skipped.Count -gt 0) {
-            Write-Error "Deployment finished with $($failed.Count) failed and $($skipped.Count) skipped resource(s). Download bifrost-deployment-report for details."
-          }
+          $rows=Import-Csv artifacts/deployment-report.csv
+          $failed=@($rows|Where-Object Status -eq 'FAILED').Count
+          $skipped=@($rows|Where-Object Status -eq 'SKIPPED').Count
+          Write-Host "Deployed: $(@($rows|Where-Object Status -eq 'DEPLOYED').Count); Failed: $failed; Skipped: $skipped"
+          if($failed -gt 0 -or $skipped -gt 0){throw "Deployment completed with $failed failed and $skipped skipped resource(s). Download bifrost-deployment-report."}
