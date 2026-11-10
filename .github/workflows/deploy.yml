@@ -8,6 +8,9 @@ permissions:
   id-token: write
 
 jobs:
+  # 🧪 JOB 1 — PRECHECKS
+  # Validates input.json, required resource arrays, GitHub secrets and subscription ID.
+  # This job does not deploy Azure resources.
   prechecks:
     name: 🧪 Validate deployment input
     runs-on: ubuntu-latest
@@ -42,6 +45,9 @@ jobs:
           }
           Write-Host 'input.json structure and required secrets are valid.'
 
+  # 🔐 JOB 2 — AZURE AUTHENTICATION CHECK
+  # Runs after prechecks. Authenticates to Azure with GitHub OIDC and verifies the target subscription.
+  # Jobs use separate hosted runners, so authentication from this job is not shared with the deployment job.
   azure-login-check:
     name: 🔐 Azure OIDC authentication
     runs-on: ubuntu-latest
@@ -51,12 +57,20 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      # 🌐 Install Azure CLI on this fresh Ubuntu runner using Microsoft's internet-hosted installer.
+      - name: Install Azure CLI
+        shell: bash
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      # 🔑 Sign in to Azure using the GitHub OIDC federated identity.
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # ✅ Confirm that Azure CLI is targeting the subscription supplied through GitHub Secrets.
       - name: Verify selected subscription
         shell: pwsh
         env:
@@ -68,6 +82,9 @@ jobs:
           az account show --query '{name:name,id:id,tenantId:tenantId}' --output json
           if ($LASTEXITCODE -ne 0) { throw 'Azure subscription verification failed.' }
 
+  # 🚀 JOB 3 — RESOURCE DEPLOYMENT AND REPORTING
+  # Runs even if an earlier job fails, so requested resources can be marked SKIPPED with a reason.
+  # This job has its own Ubuntu runner and must authenticate to Azure again.
   deploy-and-report:
     name: 🚀 Deploy resources and publish report
     runs-on: ubuntu-latest
@@ -83,6 +100,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      # 🌐 Install Azure CLI from Microsoft's online installer on this separate, fresh Ubuntu runner.
+      - name: Install Azure CLI
+        if: ${{ needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
+        shell: bash
+        run: |
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+
+      # 🔁 Authenticate again: Azure login sessions do not carry over between separate jobs/runners.
       - name: Re-authenticate to Azure on the deployment runner
         id: azure-login
         if: ${{ needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
@@ -93,6 +118,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # 🏗️ Process each resource from input.json. A resource-level failure is recorded and does not stop later independent deployments.
       - name: Run fault-tolerant resource deployment
         id: deployment
         shell: pwsh
@@ -477,6 +503,7 @@ jobs:
           Write-Host "Deployment report generated. Total=$($script:Report.Count), Deployed=$deployed, Failed=$failed, Skipped=$skipped."
           
 
+      # 🧾 Create a fallback report for every requested resource if the main deployment/report step did not create its files.
       - name: Create fallback report if deployment script did not produce one
         if: ${{ always() }}
         shell: pwsh
@@ -536,6 +563,7 @@ jobs:
             $lines | Set-Content 'artifacts/deployment-report.md' -Encoding utf8
           }
 
+      # 📦 Upload CSV, JSON and Markdown reports as a downloadable GitHub Actions artifact.
       - name: Upload complete deployment report
         id: upload-report
         if: ${{ always() }}
@@ -548,6 +576,7 @@ jobs:
             artifacts/deployment-report.md
           if-no-files-found: error
           retention-days: 90
+      # 🏁 Evaluate the final result only after the artifact upload. Fail the workflow if any resource FAILED or was SKIPPED.
       - name: Mark run failed when resources failed or were skipped
         if: ${{ always() && steps.upload-report.outcome == 'success' }}
         shell: pwsh
