@@ -103,6 +103,47 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           ./scripts/deploy.ps1
+      - name: Create fallback report if deployment script did not produce one
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'artifacts' | Out-Null
+          if (-not (Test-Path 'artifacts/deployment-report.csv')) {
+            $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
+            $definitions = @(
+              @{Type='Resource Group';Key='resourceGroups';Name='rgName'},
+              @{Type='Network Security Group';Key='nsgs';Name='name'},
+              @{Type='Route Table';Key='routeTables';Name='name'},
+              @{Type='Virtual Network';Key='vnets';Name='name'},
+              @{Type='Subnet';Key='subnets';Name='name'},
+              @{Type='Key Vault';Key='keyVaults';Name='name'},
+              @{Type='Storage Account';Key='storageAccounts';Name='name'},
+              @{Type='SQL Database';Key='sqlDatabases';Name='databaseName'},
+              @{Type='Azure OpenAI';Key='openAiServices';Name='name'},
+              @{Type='Virtual Machine';Key='vms';Name='name'}
+            )
+            $rows = @()
+            foreach ($definition in $definitions) {
+              foreach ($item in @($cfg.landingZones.($definition.Key))) {
+                $rows += [pscustomobject]@{
+                  ResourceType=$definition.Type
+                  ResourceName=[string]$item.($definition.Name)
+                  ResourceGroup=[string]$item.resourceGroupName
+                  Status='SKIPPED'
+                  Reason='Deployment script did not produce a report. Inspect the deployment step logs.'
+                  DeploymentStage='fallback'
+                  TimestampUtc=(Get-Date).ToUniversalTime().ToString('o')
+                }
+              }
+            }
+            $rows | Export-Csv 'artifacts/deployment-report.csv' -NoTypeInformation -Encoding utf8
+            $rows | ConvertTo-Json -Depth 10 | Set-Content 'artifacts/deployment-report.json' -Encoding utf8
+            @('# BIFROST Deployment Report','','Fallback report: deployment script did not complete. Inspect workflow logs.','','| Type | Resource | Resource group | Status | Reason |','|---|---|---|---|---|') +
+              @($rows | ForEach-Object { "| $($_.ResourceType) | $($_.ResourceName) | $($_.ResourceGroup) | $($_.Status) | $($_.Reason) |" }) |
+              Set-Content 'artifacts/deployment-report.md' -Encoding utf8
+          }
+
       - name: Upload complete deployment report
         id: upload-report
         if: ${{ always() }}
