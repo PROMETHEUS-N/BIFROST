@@ -1,5 +1,5 @@
 
-name: BIFROST | Modular Infrastructure Deployment
+name: RBAC | Mark 1
 
 on:
   workflow_dispatch:
