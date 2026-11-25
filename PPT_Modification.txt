@@ -1,0 +1,26 @@
+1. keep only PIKE company remove the Hexaware and cloud in the bottom.
+2. ACS remove it, We can turn up Azure Resources 
+3. Add OIDC for backup, Keep Azure Monitor also for Monitoring & Integration, 4th One 
+	Make it Properly the image is blur. Words are not Proper. Modify it.
+	add desired stare workflow
+4. remove acs name
+	add the colomn as application name
+	Jira Issue Types: Mention that auto shutdown and other things we need to add in ours. 
+
+5. Remove the Jira Part. 
+	Mention that it it is manually 
+	What-if add it in Validate
+	
+7. Add Key Vault, Linux(Yes), SQL, ACA(No),
+	Requested > Provisioned
+8. add that SKu details if specifed it will 
+
+15. Remove the full slide. 
+16. Heading: Azure Catalogue for Infrastructure Provisioning
+
+17. Modularized, 
+
+
+Dev: call out the SKU, If he is mentioning the sku, 
+	if the requestor wants a higher sku, we can add that. 
+		for dev what are the skus. 
